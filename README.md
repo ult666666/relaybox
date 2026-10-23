@@ -92,6 +92,8 @@ The summary labels its inbox snapshot separately from the latest 100 matching de
 
 Library users can call `inbox.metrics()` on their existing `Inbox` instance. Normal `Inbox(path)` construction still initializes a missing database and applies the existing WAL setup; `metrics()` itself performs only a SELECT. Clock values must be finite Unix seconds from 0 through 253402300799 (through year 9999); booleans and invalid ranges raise `ValidationError`. This is a local diagnostic snapshot, not a monitor, throughput estimate, completion promise or service-health certificate. Aggregates can scan all rows, though they do not select payloads or private job fields. See the [exact metrics contract](docs/API.md#queue-metrics).
 
+To inspect that scan cost, use the source-only [local measurement tool](docs/PERFORMANCE.md). It checks a fixed synthetic workload against an independent oracle, then retains raw installed-library call timings and environment metadata. No production capacity or timing threshold is implied.
+
 ## Back up and drill recovery
 
 Version 0.3.0 adds consistent local SQLite snapshots. Never copy just a live inbox's main file: committed jobs may still be in its WAL. Choose an existing trusted private directory and fresh destination names:
@@ -157,6 +159,6 @@ CI runs the complete suite, installs the package, executes the installed CLI out
 - **Small scope:** 64 KiB JSON objects, 32 active HTTP handlers, three-second socket read timeout, 10-second SQLite busy timeout. The local worker bounds claims, not handler runtime. No outbound delivery, rate quotas, background scheduler, automatic lease renewal, or distributed worker coordination.
 - **Recovery requires activity:** expiry is reconciled on the next claim. The dashboard reports persisted state and may show an expired lease until a worker polls.
 - **Storage is bounded only by your disk:** no retention, encryption at rest, automatic backups, migrations beyond schema version 1, payload search, or full audit history. The dashboard shows the latest 100 matches; the API allows up to 500.
-- **Demonstration evidence:** synthetic records and deterministic logical state transitions, with measured local checks. No customer usage, production reliability, benchmark, or independent security audit claims.
+- **Demonstration evidence:** synthetic records and deterministic logical state transitions, with measured local checks. No customer usage, production reliability, deployment-capacity benchmark, or independent security audit claims.
 
 See [SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under [MIT](LICENSE).

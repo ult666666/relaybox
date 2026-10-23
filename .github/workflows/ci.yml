@@ -32,5 +32,9 @@ jobs:
         run: python examples/verify_worker.py
       - name: Installed snapshot, verification and new-path recovery outside checkout
         run: python examples/verify_backup.py
+      - name: Installed diagnostic measurement correctness smoke (no timing threshold)
+        run: |
+          cd "$RUNNER_TEMP"
+          python -I "$GITHUB_WORKSPACE/examples/benchmark_metrics.py" --sizes 10 1000 --samples 5 --warmups 1
       - name: CLI entry point
         run: relaybox --help
