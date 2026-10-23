@@ -85,6 +85,8 @@ The expiry becomes `max(existing lease_until, now + lease_seconds)` and `updated
 
 `relaybox.worker.run_worker(inbox, handler, *, worker='local-worker', max_jobs=1, lease_seconds=30) -> dict` accepts a callable receiving a claimed job. Worker-name and lease validation match `Inbox.claim`; `max_jobs` must be an integer 1–1000 (booleans rejected). All configuration is checked before any claim. A normal handler return attempts acknowledgment; a handler `Exception` records a nonempty UTF-8 diagnostic of at most 500 characters and attempts failure. A handler's return value is ignored.
 
+If rendering an exception's text raises another ordinary `Exception`, the diagnostic falls back to the handler exception's type and an unavailable-text message, with the same encoding and length bound. This fallback does not catch KeyboardInterrupt/SystemExit raised during formatting, and it does not catch storage errors from failure completion.
+
 The result has integer `claimed`, `succeeded`, `failed`, and `lost_leases` counts. `failed` counts recorded retry/dead-letter transitions. If acknowledgment or failure rejects ownership with `InvalidTransition`, only `lost_leases` increments; therefore `claimed = succeeded + failed + lost_leases` on normal return. Inbox errors other than ownership rejection propagate instead of becoming a successful-looking summary. KeyboardInterrupt/SystemExit propagate without failure completion, leaving the lease for recovery. No handler timeout, wait for future retries, background renewal, or unbounded polling occurs. With zero-delay retry policies the same delivery can count as several claims, up to the bound.
 
 `ReceiptHandler(path)` is a callable local demonstration handler. It publishes a file named:

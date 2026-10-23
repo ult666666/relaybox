@@ -11,6 +11,11 @@ from unittest.mock import patch
 from relaybox.store import Inbox, ValidationError
 
 
+class BrokenDiagnostic(Exception):
+    def __str__(self):
+        raise ValueError("synthetic diagnostic rendering failure")
+
+
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -151,6 +156,93 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(error.strip())
             self.assertLessEqual(len(error), 500)
             error.encode("utf-8")
+
+    def test_unprintable_exception_records_retry_and_continues_ready_work(self):
+        failed, _ = self.inbox.ingest("broken-diagnostic", b'{}')
+        ready, _ = self.inbox.ingest("next-ready", b'{}')
+        def handler(job):
+            if job["delivery_id"] == "broken-diagnostic":
+                raise BrokenDiagnostic()
+        self.assertEqual(self.worker(handler, max_jobs=10),
+                         {"claimed": 2, "succeeded": 1, "failed": 1, "lost_leases": 0})
+        state = self.inbox.get(failed["id"])
+        self.assertEqual(state["state"], "queued")
+        self.assertEqual(state["available_at"], 1002)
+        self.assertEqual(state["attempts"], 1)
+        self.assertIn("BrokenDiagnostic", state["last_error"])
+        self.assertTrue(state["last_error"].strip())
+        self.assertLessEqual(len(state["last_error"]), 500)
+        state["last_error"].encode("utf-8")
+        self.assertEqual(self.inbox.get(ready["id"])["state"], "succeeded")
+
+    def test_unprintable_exception_reaches_dead_letter_at_stored_attempt_limit(self):
+        self.inbox = Inbox(self.root / "inbox.sqlite3", clock=lambda: self.now,
+                           max_attempts=2, base_delay=0)
+        job, _ = self.inbox.ingest("broken-diagnostic", b'{}')
+        def handler(_):
+            raise BrokenDiagnostic()
+        self.assertEqual(self.worker(handler, max_jobs=10),
+                         {"claimed": 2, "succeeded": 0, "failed": 2, "lost_leases": 0})
+        state = self.inbox.get(job["id"])
+        self.assertEqual(state["state"], "dead_letter")
+        self.assertEqual(state["attempts"], 2)
+        self.assertIn("BrokenDiagnostic", state["last_error"])
+
+    def test_fallback_diagnostic_is_bounded_and_utf8_even_for_unusual_type_name(self):
+        job, _ = self.inbox.ingest("unusual-diagnostic", b'{}')
+        error_type = type("Broken错误" + "x" * 600, (BrokenDiagnostic,), {})
+        def handler(_):
+            raise error_type()
+        self.assertEqual(self.worker(handler),
+                         {"claimed": 1, "succeeded": 0, "failed": 1, "lost_leases": 0})
+        diagnostic = self.inbox.get(job["id"])["last_error"]
+        self.assertTrue(diagnostic.startswith("Broken"))
+        self.assertLessEqual(len(diagnostic), 500)
+        diagnostic.encode("utf-8")
+
+    def test_unprintable_exception_with_lost_lease_counts_only_lost_ownership(self):
+        job, _ = self.inbox.ingest("broken-diagnostic", b'{}')
+        replacement = []
+        def handler(_):
+            self.now += 30
+            replacement.append(self.inbox.claim("replacement"))
+            raise BrokenDiagnostic()
+        self.assertEqual(self.worker(handler),
+                         {"claimed": 1, "succeeded": 0, "failed": 0, "lost_leases": 1})
+        self.assertEqual(self.inbox.get(job["id"])["lease_token"], replacement[0]["lease_token"])
+        self.assertIsNone(self.inbox.get(job["id"])["last_error"])
+
+    def test_storage_error_after_unprintable_exception_is_not_hidden(self):
+        job, _ = self.inbox.ingest("broken-diagnostic", b'{}')
+        def handler(_):
+            self.inbox.path = str(self.root / "missing" / "inbox.sqlite3")
+            raise BrokenDiagnostic()
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.worker(handler)
+        finally:
+            self.inbox.path = str(self.root / "inbox.sqlite3")
+        self.assertEqual(self.inbox.get(job["id"])["state"], "leased")
+        self.assertIsNone(self.inbox.get(job["id"])["last_error"])
+
+    def test_interrupt_during_diagnostic_rendering_leaves_lease_for_recovery(self):
+        for interrupt in [KeyboardInterrupt, SystemExit]:
+            with self.subTest(interrupt=interrupt):
+                job, _ = self.inbox.ingest(interrupt.__name__, b'{}')
+                class InterruptedDiagnostic(Exception):
+                    def __str__(self):
+                        raise interrupt()
+                def handler(_):
+                    raise InterruptedDiagnostic()
+                with self.assertRaises(interrupt):
+                    self.worker(handler)
+                self.assertEqual(self.inbox.get(job["id"])["state"], "leased")
+                self.assertIsNone(self.inbox.get(job["id"])["last_error"])
+                self.now += 30
+                replacement = self.inbox.claim("recovery")
+                self.assertEqual(replacement["id"], job["id"])
+                self.assertEqual(replacement["attempts"], 2)
+                self.inbox.ack(job["id"], replacement["lease_token"])
 
 
 class ReceiptTests(unittest.TestCase):

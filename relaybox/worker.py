@@ -33,7 +33,11 @@ def run_worker(inbox, handler, *, worker="local-worker", max_jobs=1, lease_secon
         try:
             handler(job)
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}".encode("utf-8", errors="replace").decode("utf-8")[:500]
+            try:
+                error = f"{type(exc).__name__}: {exc}"
+            except Exception:
+                error = f"{type(exc).__name__}: exception text unavailable"
+            error = error.encode("utf-8", errors="replace").decode("utf-8")[:500]
             try:
                 inbox.fail(job_id, token, error)
             except InvalidTransition:

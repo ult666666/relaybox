@@ -4,17 +4,19 @@ Verified locally on macOS arm64 on 23 October 2026. All records and requests use
 
 ## v0.2.0 bounded worker and renewable lease
 
-The current suite contains **96 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP boundary, 13 CLI subprocess, and 24 worker/receipt tests. The original v0.1.0 evidence is retained below as historical evidence.
+The current suite contains **102 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP boundary, 13 CLI subprocess, and 30 worker/receipt tests. The original v0.1.0 evidence is retained below as historical evidence.
 
 | Interpreter | Exact command | Observed result |
 |---|---|---|
-| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 96 passed, 2.600 seconds |
-| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 96 passed, 3.246 seconds |
-| CPython 3.15.0 | `python3 -m unittest discover -v` | 96 passed, 3.340 seconds |
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 102 passed, 2.780 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 102 passed, 3.555 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 102 passed, 3.709 seconds |
 
 Tests were written before the new interfaces; the first run failed on absent `Inbox.renew`, worker module, and CLI commands. Renewal tests cover exact expiry, wrong and stale tokens, never-shortening extension, unchanged ownership/attempts, validation, missing jobs, deterministic write-lock clock sampling, and concurrent renewal/completion. The existing trace-callback/event synchronization is reused without timing sleeps. A new out-of-range integer case exposed `math.isfinite` raising `OverflowError` before the bounds check; checking range first now returns the documented `ValidationError`.
 
 Worker tests exercise successful ack, claim bounds, validation before claiming, empty/ready-empty stop, retry/dead-letter policy, explicit in-handler renewal, lost leases on ack and fail, real SQLite completion errors, bounded diagnostics, and KeyboardInterrupt/SystemExit recovery. A handler-dictionary mutation test was checked by temporarily using the modified ID/token for completion: both success/failure cases failed with `KeyError`, and both pass when the original claim capability is retained.
+
+Independent review then reproduced a normal handler exception whose `__str__` raised another exception, preventing the promised failure transition. Six focused regressions cover retry plus remaining ready work, dead-letter policy, long Unicode type-name diagnostic bounds, lost-lease count exclusivity, storage-error propagation, and interrupts during formatting. Against the original formatter, five cases failed on the secondary formatting exception while the interrupt case already passed. A guard limited to ordinary diagnostic-rendering exceptions now supplies a type-based fallback before the common UTF-8/500-character bound. All six pass; KeyboardInterrupt/SystemExit and storage failures still propagate. A test fixture initially used a surrogate in a class name, which Python rejects before worker execution; it was corrected to a valid long Unicode name before rerunning the red/green cycle.
 
 Receipt tests cover repeat after lease expiry/reclaim without rewriting, shared identity across databases, distinct IDs with identical bodies, exact-byte digest differences, hostile legal IDs, conflict/corruption/noncanonical contents, symlink and nonregular targets, private POSIX permissions, concurrent identical publication, and cleanup on publication failure. A focused failing compatibility test drove trusted ancestor canonicalization: normal macOS `/var` aliases work while the selected directory itself and final receipt entries still reject symlinks. An injected publication collision with no retained file now fails explicitly instead of reporting success without an effect. CLI subprocess tests exercise exits 0, 1 and 2; the lost-lease case injects only logical clock samples while retaining real CLI parsing, SQLite transitions, and receipt files.
 
@@ -29,6 +31,8 @@ python3.13 -m venv .local/worker-venv
 ```
 
 Both checks run their child processes outside the checkout. The new worker check invokes the installed `relaybox` entry point, starts its server on an ephemeral loopback port, signs synthetic file bytes through the CLI, ingests them twice (202/200), processes a single receipt, verifies persisted `succeeded` state and token omission, and checks empty work and invalid configuration. The existing installed-service check confirms all three packaged dashboard assets and the original demo behavior. Installed package metadata and `relaybox.__version__` both report 0.2.0 from the virtual environment's site-packages.
+
+After the diagnostic repair, a fresh wheel was built into `.local/worker-review-wheel/` and installed with `--no-deps --no-index` into a new `.local/worker-review-venv/`. Both installed checks passed again with that interpreter. An isolated `python -I` library probe also loaded the installed 0.2.0 package, raised the unprintable handler exception against a real temporary inbox, and observed `{claimed: 2, succeeded: 1, failed: 1, lost_leases: 0}`, a queued retry at 1002, and successful processing of the next ready delivery. This confirms the reviewed repair is present in the installed wheel.
 
 Observed installed-worker output:
 
