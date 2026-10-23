@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "relaybox-inbox"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local signed webhook inbox with SQLite leases and explicit recovery"
 readme = "README.md"
 requires-python = ">=3.11"

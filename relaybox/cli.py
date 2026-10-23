@@ -9,6 +9,7 @@ import sys
 import time
 
 from .auth import sign
+from .backup import backup_database, verify_backup
 from .demo import seed_demo
 from .server import make_server
 from .store import Conflict, Inbox, InvalidTransition, ValidationError, parse_payload, validate_delivery_id
@@ -37,6 +38,14 @@ def parser():
     commands.add_parser("init", help="initialize the local database")
     commands.add_parser("demo", help="populate an empty database with four synthetic delivery states")
     commands.add_parser("stats", help="print counts for every state")
+    for name, argument, help_text in [
+        ("backup", "destination", "publish a consistent snapshot of --db to a new path"),
+        ("verify-backup", "backup", "read and verify a standalone trusted snapshot"),
+        ("restore", "backup", "restore a snapshot into a nonexistent --db path"),
+    ]:
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument(argument, type=Path)
+        command.add_argument("--timeout", type=float, default=10, help="shared deadline in seconds (0.1–60, default 10)")
     listing = commands.add_parser("list", help="list latest job summaries")
     listing.add_argument("--state", choices=["queued", "leased", "succeeded", "dead_letter"])
     listing.add_argument("--limit", type=int, default=100)
@@ -73,6 +82,16 @@ def parser():
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
+        # Recovery must never initialize Inbox or create source/destination parents.
+        if args.command == "backup":
+            _print(backup_database(args.db, args.destination, timeout=args.timeout))
+            return 0
+        if args.command == "verify-backup":
+            _print(verify_backup(args.backup, timeout=args.timeout))
+            return 0
+        if args.command == "restore":
+            _print(backup_database(args.backup, args.db, timeout=args.timeout))
+            return 0
         if args.command == "sign":
             validate_delivery_id(args.delivery_id)
             body = args.payload.read_bytes()

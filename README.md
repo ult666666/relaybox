@@ -84,6 +84,31 @@ python3 -m relaybox --db .local/demo.sqlite3 fail JOB_ID --token TOKEN --error "
 
 Commands return JSON; successful commands exit `0`, invalid arguments or failed operations exit `2`. `work` exits `1` if any handler failure was recorded or ownership was lost before completion. An empty claim is successful and returns `{"job": null}`. Replay is deliberately explicit and only accepts dead letters. Each replay resets the attempt budget; a local operator can request further replays. Worker operations stay in the CLI/library, so the dashboard cannot mutate jobs.
 
+## Back up and drill recovery
+
+Version 0.3.0 adds consistent local SQLite snapshots. Never copy just a live inbox's main file: committed jobs may still be in its WAL. Choose an existing trusted private directory and fresh destination names:
+
+```bash
+python3 -m relaybox --db .local/demo.sqlite3 backup .local/snapshot.sqlite3 --timeout 10
+python3 -m relaybox verify-backup .local/snapshot.sqlite3
+```
+
+The JSON receipt reports canonical paths, schema version, integrity, job/state counts, physical SHA-256 and file size. It omits payloads and private lease tokens. The **snapshot itself contains all database data, including tokens and payloads**; protect it like the original. The online backup includes committed WAL data and excludes uncommitted changes. It validates the known schema and completed snapshot before exclusively publishing a private `0600` file. Existing paths, symlinks, and stale SQLite sidecars are refused; no overwrite or `--force` exists.
+
+Before switching to a restored path, **stop the original service and every original worker**. Keep the original stopped during the drill. Restore to a new name; do not initialize that destination first:
+
+```bash
+python3 -m relaybox --db .local/recovered.sqlite3 restore .local/snapshot.sqlite3
+python3 -m relaybox --db .local/recovered.sqlite3 stats
+python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipts --max-jobs 10
+```
+
+Compare restore counts with the saved backup receipt before processing work. Attempts, retry policy, replay count and lease fields survive exactly. Expired leases reconcile on the next claim; an unexpired lease remains leased until it expires. The restored copy is an independent local inbox and cannot fence workers using the original. Work performed after the snapshot may repeat after recovery. Retain the same canonical receipt directory separately: backing up the database does not back up receipts. An identical retained receipt lets the demonstration handler repeat safely after a crash before ack; deleting/editing it removes that evidence. External handlers still need their own idempotency. There is no cross-database exactly-once guarantee.
+
+Only operator-owned RelayBox schema-1 files in trusted local directories are supported; this is not a sandbox for hostile database files. No migration or repair is attempted. Ancestor aliases are canonicalized, while explicitly selected symlinks are rejected. Snapshot operations accept a finite 0.1–60 second deadline (default 10), check SQLite VM/backup progress and hash chunks, and reject databases larger than 1 GiB. The deadline cannot interrupt a blocked operating-system I/O call. Verification requires a quiescent standalone DELETE-journal snapshot without sidecars; use `backup` first for live inboxes. Hard-link support is required, Windows ACLs are unverified, hard kills may leave private temporary files, and directory metadata is not fsynced. See the [complete contract](docs/API.md#backup-and-recovery-contract).
+
+After installing, `python examples/verify_backup.py` performs an isolated synthetic backup → verify → restore → expired-lease receipt drill outside the checkout.
+
 ## Library API
 
 ```python
@@ -115,7 +140,7 @@ Start with [`store.py`](relaybox/store.py) for atomic `BEGIN IMMEDIATE` claims a
 python3 -m unittest discover -v
 ```
 
-CI runs the complete suite, installs the package, executes the installed CLI outside the checkout, requests assets from the installed server, and verifies signed ingestion → receipt processing → acknowledgment on Python 3.11 and 3.13. After installation, run `python examples/verify_install.py` and `python examples/verify_worker.py` with that environment's interpreter. Read [verification evidence](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
+CI runs the complete suite, installs the package, executes the installed CLI outside the checkout, requests assets from the installed server, and verifies signed ingestion → receipt processing → acknowledgment plus snapshot → new-path recovery on Python 3.11 and 3.13. After installation, run `python examples/verify_install.py`, `python examples/verify_worker.py`, and `python examples/verify_backup.py` with that environment's interpreter. Read [verification evidence](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
 
 ## Limits that matter
 

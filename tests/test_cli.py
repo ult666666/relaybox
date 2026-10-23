@@ -163,3 +163,70 @@ sys.exit(code)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(inbox.get(job["id"])["attempts"], 0)
+
+
+class RecoveryCLITests(unittest.TestCase):
+    """Recovery commands must run before any Inbox initialization."""
+
+    setUp = CLITests.setUp
+    run_cli = CLITests.run_cli
+
+    def test_backup_verify_restore_and_receipt_journey(self):
+        from relaybox.store import Inbox
+        inbox = Inbox(self.db)
+        job, _ = inbox.ingest("recover-cli", b'{"secret":"payload-is-not-a-receipt-field"}')
+        backup = Path(self.tmp.name) / "备份 with spaces.sqlite3"
+        result = self.run_cli("backup", str(backup))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads(result.stdout)
+        self.assertEqual(metadata["counts"], {"queued": 1, "leased": 0, "succeeded": 0, "dead_letter": 0})
+        self.assertNotIn("payload-is-not-a-receipt-field", result.stdout)
+        verified = self.run_cli("verify-backup", str(backup))
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(json.loads(verified.stdout)["sha256"], metadata["sha256"])
+        original = self.db
+        restored = Path(self.tmp.name) / "恢复 inbox.sqlite3"
+        self.db = restored
+        restoration = self.run_cli("restore", str(backup))
+        self.assertEqual(restoration.returncode, 0, restoration.stderr)
+        self.assertEqual(json.loads(restoration.stdout)["counts"], metadata["counts"])
+        before = restored.read_bytes()
+        denied = self.run_cli("restore", str(backup))
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("error", json.loads(denied.stderr))
+        self.assertEqual(restored.read_bytes(), before)
+        receipts = Path(self.tmp.name) / "receipts"
+        worked = self.run_cli("work", "--receipts", str(receipts))
+        self.assertEqual(worked.returncode, 0, worked.stderr)
+        self.assertEqual(json.loads(worked.stdout), {"claimed": 1, "succeeded": 1, "failed": 0, "lost_leases": 0})
+        self.assertEqual(len(list(receipts.glob("*.json"))), 1)
+        self.assertEqual(Inbox(restored).get(job["id"])["state"], "succeeded")
+        self.assertEqual(inbox.get(job["id"])["state"], "queued")
+        self.db = original
+
+    def test_recovery_errors_do_not_create_db_or_parent(self):
+        missing = Path(self.tmp.name) / "missing-source.sqlite3"
+        output = Path(self.tmp.name) / "new.sqlite3"
+        for command in [("backup", str(output)), ("verify-backup", str(missing)), ("restore", str(missing))]:
+            with self.subTest(command=command):
+                result = self.run_cli(*command)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("error", json.loads(result.stderr))
+                self.assertFalse(self.db.exists())
+                self.assertFalse(output.exists())
+                self.assertFalse(missing.exists())
+        self.db = Path(self.tmp.name) / "absent-parent" / "new.sqlite3"
+        result = self.run_cli("restore", str(missing))
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.db.parent.exists())
+
+    def test_recovery_timeout_options_are_controlled_json_errors(self):
+        from relaybox.store import Inbox
+        Inbox(self.db)
+        backup = Path(self.tmp.name) / "backup.sqlite3"
+        for timeout in ["nan", "inf", "0", "61"]:
+            result = self.run_cli("backup", str(backup), "--timeout", timeout)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("error", json.loads(result.stderr))
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(backup.exists())
