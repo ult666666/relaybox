@@ -1,10 +1,12 @@
 """Behavior/oracle checks for the source-only diagnostic measurement tool."""
 
 import importlib.util
+import importlib.metadata
 import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -83,6 +85,43 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tool.installed_runtime()
 
+    def test_missing_distribution_metadata_has_the_same_controlled_helper_rejection(self):
+        with patch.object(self.tool.importlib.metadata, "distribution", side_effect=importlib.metadata.PackageNotFoundError("synthetic")):
+            with self.assertRaises(ValueError):
+                self.tool.installed_runtime()
+
+    def test_first_oracle_read_cannot_hide_a_persisted_body_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inbox = self.tool.seed(Inbox, Path(directory) / "synthetic.sqlite3", 10)
+            original, first = inbox.metrics, [True]
+            def mutate_once():
+                if first[0]:
+                    first[0] = False
+                    with sqlite3.connect(inbox.path) as connection:
+                        connection.execute("UPDATE jobs SET body=? WHERE id=1", (b"{}",))
+                return original()
+            inbox.metrics = mutate_once
+            with self.assertRaises(ValueError):
+                self.tool.measure(inbox, 10, samples=5, warmups=1, deadline=self.tool.time.monotonic() + 15)
+
+    def test_fingerprint_and_measurement_cover_the_persisted_application_schema_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inbox = self.tool.seed(Inbox, Path(directory) / "synthetic.sqlite3", 10)
+            before = self.tool.database_digest(inbox.path)
+            with sqlite3.connect(inbox.path) as connection:
+                connection.execute("PRAGMA user_version=9")
+            self.assertNotEqual(self.tool.database_digest(inbox.path), before)
+            with sqlite3.connect(inbox.path) as connection:
+                connection.execute("PRAGMA user_version=1")
+            original = inbox.metrics
+            def mutate_version():
+                with sqlite3.connect(inbox.path) as connection:
+                    connection.execute("PRAGMA user_version=9")
+                return original()
+            inbox.metrics = mutate_version
+            with self.assertRaises(ValueError):
+                self.tool.measure(inbox, 10, samples=5, warmups=1, deadline=self.tool.time.monotonic() + 15)
+
     def test_unavailable_installation_reports_fixed_diagnostic_without_traceback(self):
         errors = io.StringIO()
         with patch.object(self.tool, "installed_runtime", side_effect=ModuleNotFoundError("private synthetic path")), redirect_stderr(errors):
@@ -104,3 +143,21 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("local", receipt["notice"])
         for private in [str(Path.home()), directory, "lease_token", "hostname", "PYTHONPATH"]:
             self.assertNotIn(private, result.stdout)
+
+    @unittest.skipUnless(os.environ.get("RELAYBOX_BENCH_PYTHON"), "set RELAYBOX_BENCH_PYTHON to an installed isolated interpreter")
+    def test_real_cli_parser_failures_do_not_echo_private_values_and_help_still_works(self):
+        private_path, private_token = "/private/synthetic-operator/inbox.sqlite3", "synthetic-secret-token-DO-NOT-ECHO"
+        with tempfile.TemporaryDirectory() as directory:
+            for args in [["--sizes", private_path], ["--samples", private_token], ["--db", private_path], ["--token", private_token]]:
+                result = subprocess.run([os.environ["RELAYBOX_BENCH_PYTHON"], "-I", str(SCRIPT), *args], cwd=directory, capture_output=True, text=True, timeout=10)
+                with self.subTest(args=args):
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn(private_path, result.stderr)
+                    self.assertNotIn(private_token, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertLess(len(result.stderr), 200)
+            help_result = subprocess.run([os.environ["RELAYBOX_BENCH_PYTHON"], "-I", str(SCRIPT), "--help"], cwd=directory, capture_output=True, text=True, timeout=10)
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn("usage:", help_result.stdout)
+        self.assertEqual(help_result.stderr, "")

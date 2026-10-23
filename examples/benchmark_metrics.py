@@ -32,8 +32,14 @@ NOTICE = ("Single-host, warm-cache local library call durations on fixed synthet
           "The fixed logical snapshot time is unrelated to measured elapsed durations.")
 
 
+class OptionsParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse's default error embeds invalid values and unknown arguments.
+        raise ValueError("invalid measurement arguments")
+
+
 def options(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = OptionsParser(description=__doc__)
     parser.add_argument("--sizes", nargs="+", type=int, default=[100, 1000, 10000],
                         help="1–4 unique row counts, multiples of 10 from 10 through 200000")
     parser.add_argument("--samples", type=int, default=30, help="timed calls per operation, 5–200 (default 30)")
@@ -55,9 +61,12 @@ def summarize(samples):
 
 
 def installed_runtime():
-    import relaybox
-    from relaybox import store
-    distribution = importlib.metadata.distribution("relaybox-inbox")
+    try:
+        import relaybox
+        from relaybox import store
+        distribution = importlib.metadata.distribution("relaybox-inbox")
+    except (ImportError, importlib.metadata.PackageNotFoundError):
+        raise ValueError("a trusted installed RelayBox runtime is required") from None
     module = Path(store.__file__).resolve()
     installed = Path(distribution.locate_file("relaybox/store.py")).resolve()
     source = Path(__file__).resolve().parents[1] / "relaybox" / "store.py"
@@ -94,9 +103,11 @@ def seed(inbox_type, path, rows):
 
 
 def database_digest(path):
-    """Logical schema/all-column hash, outside the measured intervals."""
+    """Application schema marker and logical schema/all-column hash, untimed."""
     result = hashlib.sha256()
     with closing(sqlite3.connect(path)) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        result.update(f"user_version={version}\n".encode("ascii"))
         for line in connection.iterdump():
             result.update(line.encode("utf-8") + b"\n")
     return result.hexdigest()
@@ -125,8 +136,8 @@ def measure(inbox, rows, *, samples, warmups, deadline):
         if time.monotonic() >= deadline:
             raise ValueError("cooperative ten-minute measurement deadline exceeded")
     remaining()
-    check(inbox, rows)
     before = database_digest(inbox.path)
+    check(inbox, rows)
     result = {"rows": rows, "latest_list_rows": min(rows, 100)}
     for name, operation in [("metrics", inbox.metrics), ("latest_100", lambda: inbox.list_jobs(limit=100))]:
         for _ in range(warmups):

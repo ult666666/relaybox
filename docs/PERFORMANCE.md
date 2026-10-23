@@ -46,8 +46,9 @@ populates only a new private temporary database using the checked-in profile.
 Seeding is excluded from timed calls. This is **not an ingestion benchmark**.
 Before and after timing, the tool independently checks all metric counts and
 times, plus the latest-list count, IDs, order, states and readiness/lease fields.
-A logical dump hash covers the schema and every persisted column before and
-after the measurement. No rows, payloads, worker tokens or database files appear
+A logical fingerprint covers the application’s persisted `user_version` marker,
+schema and every persisted column, starting before the first oracle read and
+ending after the final read. No rows, payloads, worker tokens or database files appear
 in the receipt; temporary state is removed on ordinary completion or failure.
 
 For each size, the script warms and measures `metrics()` first, then
@@ -88,7 +89,7 @@ Python 3.11 and 3.13.
 
 ## One dated local observation
 
-A run on **2026-10-23 at 22:38 UTC**, using the released 0.4.0 wheel on macOS
+A run on **2026-10-23 at 22:43 UTC**, using the released 0.4.0 wheel on macOS
 arm64, Python 3.13.7 and SQLite 3.50.4, produced the following. It used 5 warmups
 and 30 samples per operation. Other development work was running on the same
 machine; background activity, hardware frequency and cache residency were not
@@ -96,10 +97,10 @@ controlled. These are observed call durations, not comparative benchmark scores.
 
 | Persisted rows | Metrics p50 (ms) | Metrics p95 (ms) | Latest 100 p50 (ms) |
 | ---: | ---: | ---: | ---: |
-| 100 | 0.447 | 0.580 | 0.589 |
-| 1,000 | 0.698 | 0.876 | 0.636 |
-| 10,000 | 3.509 | 4.056 | 0.581 |
-| 100,000 | 31.475 | 34.692 | 0.983 |
+| 100 | 0.725 | 2.957 | 0.595 |
+| 1,000 | 0.661 | 0.974 | 0.533 |
+| 10,000 | 3.138 | 3.299 | 0.550 |
+| 100,000 | 32.813 | 58.892 | 0.559 |
 
 The [complete raw receipt](measurements/macos-arm64-20261023.json) retains all
 samples and exact hashes. All four independent profile checks and logical
