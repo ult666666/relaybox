@@ -80,3 +80,12 @@ python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipt
 服务仅监听 IPv4 回环地址，采用明文 HTTP、单个 HMAC 密钥。请求上限 64 KiB，每次套接字读取超时 3 秒，同时处理最多 32 个连接。没有对外投递、账户权限、自动清理、自动备份或分布式扩展。任何能访问本地服务的进程都可能读取内容。租约令牌只保护此数据库，不能保证外部操作恰好执行一次。
 
 项目实现与测试使用了 AI 辅助。请查看 [架构](ARCHITECTURE.md)、[API](API.md)、[验证记录](VERIFICATION.md) 与 [安全说明](../SECURITY.md) 了解真实验证范围和限制。
+
+
+## 本地诊断测量
+
+源码工具 `examples/benchmark_metrics.py` 使用已安装的包和独立临时数据库，
+先核对固定合成数据的计数，再记录 `metrics()` 与最近 100 条列表的实际调用耗时。
+[测量方法与原始样本](PERFORMANCE.md) 说明预热、原始纳秒样本、分位数和环境。
+这些数值来自一台共享开发机器，不代表生产吞吐量、服务容量或模型响应延迟。
+工具不接受现有数据库路径，也不会修改操作人员的收件箱。
