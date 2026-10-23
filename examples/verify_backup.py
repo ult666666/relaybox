@@ -55,6 +55,18 @@ print(json.dumps({"version": relaybox.__version__, "package": relaybox.__file__}
             assert "lease_token" not in result.stdout
             return json.loads(result.stderr if expected == 2 else result.stdout)
 
+        # A closed normal inbox retains the WAL header but no WAL/SHM files.
+        # Unsupported verification must reject it without creating sidecars or
+        # changing any pre-existing file, including independently kept receipts.
+        assert original.read_bytes()[18:20] == bytes((2, 2))
+        before_entries = {item.name for item in root.iterdir()}
+        before_files = {item.relative_to(root): item.read_bytes() for item in root.rglob("*") if item.is_file()}
+        rejected = cli(restored, "verify-backup", original, expected=2)
+        assert "standalone" in rejected["error"]
+        assert {item.name for item in root.iterdir()} == before_entries
+        assert {item.relative_to(root): item.read_bytes() for item in root.rglob("*") if item.is_file()} == before_files
+        assert not restored.exists()
+
         snapshot = cli(original, "backup", backup)
         assert snapshot["counts"] == {"queued": 0, "leased": 1, "succeeded": 0, "dead_letter": 0}
         assert snapshot["sha256"] == hashlib.sha256(backup.read_bytes()).hexdigest()
@@ -96,6 +108,7 @@ print(json.dumps({"all_columns_preserved": True, "duplicate_created": created}))
         assert len(list(receipts.glob("*.json"))) == 1
         print(json.dumps({"installed_backup": "ok", "version": setup["version"],
                           "snapshot_jobs": snapshot["jobs"], "verified_sha256": True,
+                          "rejected_wal_unchanged": True,
                           **comparison, "summary": summary, "receipt_reused_without_rewrite": True,
                           "original_state": "leased", "restored_state": "succeeded",
                           "outside_checkout": True}))

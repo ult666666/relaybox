@@ -4,15 +4,17 @@ Verified locally on macOS arm64 on 23 October 2026. All records and requests use
 
 ## v0.3.0 consistent snapshots and new-path recovery
 
-The v0.3.0 suite contains **124 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP, 16 CLI subprocess, 30 worker/receipt, and 19 backup/recovery tests. The v0.1.0 and v0.2.0 records/tags are retained as historical evidence. The branch started from clean integrated main `3b4df17d8c8f5252206bb839398170c4e5ea49fd`.
+The v0.3.0 suite contains **125 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP, 16 CLI subprocess, 30 worker/receipt, and 20 backup/recovery tests. The v0.1.0 and v0.2.0 records/tags are retained as historical evidence. The branch started from clean integrated main `3b4df17d8c8f5252206bb839398170c4e5ea49fd`.
 
 | Interpreter | Exact command | Observed result |
 |---|---|---|
-| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 124 passed, 3.898 seconds |
-| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 124 passed, 4.668 seconds |
-| CPython 3.15.0 | `python3 -m unittest discover -v` | 124 passed, 4.860 seconds |
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 125 passed, 3.690 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 125 passed, 4.519 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 125 passed, 4.676 seconds |
 
 All final runs completed without resource warnings. Tests first failed on the absent backup module (11 failures), then missing CLI commands. A later failing schema test found that case-folding declarations accepted changed CHECK string literals; validation now preserves their case. A failing diagnostic test found that the symlink rejection was being rewrapped by the broad path-value handler; the explicit rejection is now preserved. The first full test run passed but revealed unclosed test-fixture connections on Python 3.13; fixtures now explicitly close them. A CHECK-corruption fixture initially expected an integrity diagnostic, but SQLite's read-only integrity scan on the local build omitted that particular CHECK result; the explicit known-state validation still rejected it. The assertion now accepts either rejection, and a separate damaged b-tree test exercises real corruption rejection.
+
+Independent review of `bc2e7cf` found that rejecting a normal closed WAL inbox during verification created persistent source WAL/SHM files: SQLite `mode=ro` can write sidecars in a writable directory. A new library regression failed on both extra entries, and the updated installed recovery drill failed against the prior installed wheel. The verifier now reads only the fixed 100-byte SQLite header before connecting and requires rollback-format read/write versions, rejecting WAL before SQLite can create files. It does not delete source sidecars or change the shared live-backup reader. The regression repeats rejection and compares directory entries plus all pre-existing file bytes; the installed CLI check performs the same negative-input check before its successful recovery drill. Quiescent trusted-input and no-sidecar limits still apply. The preflight follows the official [SQLite header format](https://www.sqlite.org/fileformat.html#database_header) and [read-only WAL rules](https://www.sqlite.org/wal.html#read_only_databases).
 
 Real WAL tests keep a separate writer open, commit a field into WAL, then leave a later update uncommitted. The published standalone snapshot contains the committed field and excludes the uncommitted value, while source bytes remain unchanged. Another test commits a new row from the actual SQLite backup progress callback during a multi-step copy: the source ends with 81 jobs while the pinned snapshot consistently has the original 80. No synchronization sleeps are used. Temporarily removing the source read transaction made this test fail on inconsistent snapshot metadata. Temporarily removing deadline cancellation from the progress callback made the cancellation test run 19 iterations instead of stopping after its first incomplete step. Both mutations were restored and the complete suites above passed.
 
@@ -23,20 +25,20 @@ A real second connection holds a rollback-journal `BEGIN EXCLUSIVE`; a 0.1-secon
 A fresh final Python 3.13 environment built and installed the final 0.3.0 wheel:
 
 ```bash
-python3.13 -m venv .local/backup-final-venv
-.local/backup-final-venv/bin/python -m pip wheel --no-deps --no-cache-dir --wheel-dir .local/backup-final-wheel .
-.local/backup-final-venv/bin/python -m pip install --no-deps --no-index .local/backup-final-wheel/relaybox_inbox-0.3.0-py3-none-any.whl
-.local/backup-final-venv/bin/python examples/verify_install.py
-.local/backup-final-venv/bin/python examples/verify_worker.py
-.local/backup-final-venv/bin/python examples/verify_backup.py
+python3.13 -m venv .local/backup-wal-repair-venv
+.local/backup-wal-repair-venv/bin/python -m pip wheel --no-deps --no-cache-dir --wheel-dir .local/backup-wal-repair-wheel .
+.local/backup-wal-repair-venv/bin/python -m pip install --no-deps --no-index .local/backup-wal-repair-wheel/relaybox_inbox-0.3.0-py3-none-any.whl
+.local/backup-wal-repair-venv/bin/python examples/verify_install.py
+.local/backup-wal-repair-venv/bin/python examples/verify_worker.py
+.local/backup-wal-repair-venv/bin/python examples/verify_backup.py
 ```
 
-The final wheel was 30,768 bytes with SHA-256 `33cf66ce5cede188f953eaaaaaae558663f09371d32883618af7d8de25711c66`. All three installed checks passed. Their child commands run in temporary directories outside the checkout; the recovery setup uses isolated `python -I`, checks `site-packages`, and asserts both installed metadata and `relaybox.__version__` equal 0.3.0. An earlier run against the old `.venv` failed on its missing worker module, demonstrating that the installed check does not silently import current source.
+The final wheel was 30,993 bytes with SHA-256 `43b8fbe143a61d6a5adfee68a631abf43afeb4d316ff42e41042448e4d4f68cc`. All three installed checks passed. Their child commands run in temporary directories outside the checkout; the recovery setup uses isolated `python -I`, checks `site-packages`, and asserts both installed metadata and `relaybox.__version__` equal 0.3.0. An earlier run against the old `.venv` failed on its missing worker module, demonstrating that the installed check does not silently import current source.
 
 The new drill creates a synthetic receipt before acknowledgment, leaves the original worker stopped, backs up and verifies the expired lease, restores into a nonexistent Unicode/spaced path, checks every database column, and tests same-byte deduplication plus changed-byte conflict. Installed `work` reclaims the lease at attempt 2, reuses the retained receipt without rewriting bytes or mtime, and acknowledges only the restored database. A repeat restore is rejected without overwrite. Verification does not create the unrelated `--db` destination. Observed output:
 
 ```json
-{"installed_backup":"ok","version":"0.3.0","snapshot_jobs":1,"verified_sha256":true,"all_columns_preserved":true,"duplicate_created":false,"summary":{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0},"receipt_reused_without_rewrite":true,"original_state":"leased","restored_state":"succeeded","outside_checkout":true}
+{"installed_backup":"ok","version":"0.3.0","snapshot_jobs":1,"verified_sha256":true,"rejected_wal_unchanged":true,"all_columns_preserved":true,"duplicate_created":false,"summary":{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0},"receipt_reused_without_rewrite":true,"original_state":"leased","restored_state":"succeeded","outside_checkout":true}
 ```
 
 The official [Python 3.11 backup API](https://docs.python.org/3.11/library/sqlite3.html#sqlite3.Connection.backup), [SQLite online backup API](https://www.sqlite.org/backup.html), and [SQLite journal/sidecar recovery](https://www.sqlite.org/tempfiles.html) contracts were read before implementation or the relevant sidecar repair. CI is configured to execute the new installed recovery check on Python 3.11/3.13; hosted CI/publication belongs to the parent review and is not claimed here.

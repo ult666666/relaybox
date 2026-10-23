@@ -209,6 +209,20 @@ def _file_metadata(path, deadline):
     return {"sha256": digest.hexdigest(), "size_bytes": path.stat().st_size}
 
 
+def _standalone_header(path, deadline):
+    # mode=ro can still create WAL/SHM files. Check the fixed-size SQLite
+    # header before connecting: offsets 18/19 are 1 for rollback mode, 2 for
+    # WAL. This is verifier-only; live backup must continue to read real WAL.
+    deadline.remaining()
+    with path.open("rb") as source:
+        header = source.read(100)
+    deadline.remaining()
+    if len(header) != 100 or header[:16] != b"SQLite format 3\0":
+        raise ValidationError("snapshot must have a complete SQLite database header")
+    if header[18:20] != bytes((1, 1)):
+        raise ValidationError("verify-backup requires a standalone DELETE-journal snapshot; back up a live inbox first")
+
+
 def verify_backup(path, *, timeout=10) -> dict:
     """Read and validate a trusted, quiescent schema-1 snapshot without writes.
 
@@ -218,6 +232,7 @@ def verify_backup(path, *, timeout=10) -> dict:
     deadline = _Deadline(timeout)
     source = _source(path)
     _no_sidecars(source)
+    _standalone_header(source, deadline)
     with _reader(source, deadline) as conn:
         metadata = _metadata(conn, deadline)
         # A standalone backup has no uncheckpointed state outside this file.

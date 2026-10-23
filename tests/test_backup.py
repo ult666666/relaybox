@@ -316,6 +316,18 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), damaged)
         self.assertFalse(self.destination.exists())
 
+    def test_rejected_closed_wal_verification_never_creates_or_changes_files(self):
+        Inbox(self.source).ingest("closed-wal", b'{"synthetic":true}')
+        self.assertEqual(self.source.read_bytes()[18:20], bytes((2, 2)))
+        self.assertEqual({item.name for item in self.root.iterdir()}, {self.source.name})
+        (self.root / "retained.bin").write_bytes(b"unrelated retained bytes")
+        before = {item.name: item.read_bytes() for item in self.root.iterdir()}
+        for _ in range(2):
+            with self.assertRaisesRegex(ValidationError, "standalone"):
+                self.verify(self.source)
+            self.assertEqual({item.name for item in self.root.iterdir()}, set(before))
+            self.assertEqual({item.name: item.read_bytes() for item in self.root.iterdir()}, before)
+
     def test_verify_requires_standalone_snapshot_and_validates_its_timeout(self):
         Inbox(self.source)
         with self.assertRaisesRegex(ValidationError, "standalone"):
