@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RelayBox · Local webhook inbox</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#jobs">Skip to deliveries</a>
+  <main>
+    <header class="hero">
+      <div class="brand"><span class="mark" aria-hidden="true">R↗</span><span>RelayBox</span><span class="local">LOCAL INBOX</span></div>
+      <p class="eyebrow">RECEIVE. INSPECT. RECOVER.</p>
+      <h1>Every delivery.<br>A traceable next step.</h1>
+      <p class="intro">A durable webhook inbox with signed ingestion, fenced leases, and an explicit path back from failure.</p>
+      <div class="notice"><span class="dot" aria-hidden="true"></span>Loopback only · No outbound delivery · Educational engineering demo</div>
+    </header>
+    <section aria-label="Queue totals" class="stats" id="stats">
+      <article><p>Queued</p><strong id="queued">—</strong><span>Ready or waiting for retry</span></article>
+      <article><p>Leased</p><strong id="leased">—</strong><span>Held by a worker</span></article>
+      <article><p>Succeeded</p><strong id="succeeded">—</strong><span>Acknowledged before expiry</span></article>
+      <article><p>Dead letter</p><strong id="dead_letter">—</strong><span>Attempt budget exhausted</span></article>
+    </section>
+    <section class="panel" id="jobs" aria-labelledby="jobs-title" tabindex="-1">
+      <div class="panel-head"><div><p class="eyebrow">DELIVERY EXPLORER</p><h2 id="jobs-title">The inbox</h2></div><div class="controls"><label for="state">State</label><select id="state"><option value="">All states</option><option value="queued">Queued</option><option value="leased">Leased</option><option value="succeeded">Succeeded</option><option value="dead_letter">Dead letter</option></select><button id="refresh" type="button">Refresh</button></div></div>
+      <p id="status" role="status" aria-live="polite">Connecting to the local inbox…</p>
+      <div class="table-wrap"><table><caption class="sr-only">Latest 100 deliveries, newest first. Select a delivery to inspect its payload.</caption><thead><tr><th scope="col">Delivery</th><th scope="col">State</th><th scope="col">Attempts</th><th scope="col">Received</th><th scope="col">Last error</th></tr></thead><tbody id="rows"></tbody></table></div>
+      <p class="hint">Shows at most 100 matching deliveries. Totals include the whole inbox. Refresh manually to inspect current state.</p>
+    </section>
+    <section class="panel detail" aria-labelledby="detail-title"><p class="eyebrow">PAYLOAD INSPECTOR</p><h2 id="detail-title">Select a delivery</h2><p id="detail-meta">Payloads are displayed as plain text. Worker lease tokens stay out of the HTTP API.</p><pre id="payload" tabindex="0" aria-label="Selected delivery JSON payload">No delivery selected.</pre></section>
+    <footer><p><strong>Recovery is deliberate.</strong> To replay a dead letter, use <code>relaybox --db inbox.sqlite3 replay JOB_ID</code> in your local terminal.</p><p>At-least-once processing · SQLite WAL · HMAC SHA-256 · Synthetic demo data available with <code>relaybox demo</code></p></footer>
+  </main>
+</body>
+</html>

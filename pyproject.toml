@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relaybox-inbox"
+version = "0.1.0"
+description = "A local signed webhook inbox with SQLite leases and explicit recovery"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "RelayBox contributors"}]
+keywords = ["webhook", "sqlite", "hmac", "inbox", "educational"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.scripts]
+relaybox = "relaybox.cli:main"
+
+[tool.setuptools]
+packages = ["relaybox"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+relaybox = ["assets/*.html", "assets/*.css", "assets/*.js"]
