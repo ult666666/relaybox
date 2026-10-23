@@ -19,15 +19,30 @@
     </header>
     <section aria-label="Queue totals" class="stats" id="stats">
       <article><p>Queued</p><strong id="queued">—</strong><span>Ready or waiting for retry</span></article>
-      <article><p>Leased</p><strong id="leased">—</strong><span>Held by a worker</span></article>
+      <article><p>Leased</p><strong id="leased">—</strong><span>Includes active and expired leases</span></article>
       <article><p>Succeeded</p><strong id="succeeded">—</strong><span>Acknowledged before expiry</span></article>
       <article><p>Dead letter</p><strong id="dead_letter">—</strong><span>Attempt budget exhausted</span></article>
+    </section>
+    <section class="panel operations" id="operations" aria-labelledby="operations-title">
+      <p class="eyebrow">WHOLE INBOX</p><h2 id="operations-title">Operations summary</h2>
+      <p id="metrics-status" role="status" aria-live="polite" data-state="loading">Loading inbox snapshot…</p>
+      <dl class="operations-grid">
+        <div><dt>Queued · ready now</dt><dd id="queued-ready">—</dd></div>
+        <div><dt>Queued · delayed</dt><dd id="queued-delayed">—</dd></div>
+        <div><dt>Leases · active</dt><dd id="leases-active">—</dd></div>
+        <div><dt>Expired · reclaimable</dt><dd id="leases-reclaimable">—</dd></div>
+        <div><dt>Expired · attempts exhausted</dt><dd id="leases-exhausted">—</dd></div>
+        <div><dt>Oldest ready wait</dt><dd id="oldest-ready">—</dd></div>
+        <div><dt>Next queued retry · local time</dt><dd id="next-retry">—</dd></div>
+        <div><dt>Next active lease expiry · local time</dt><dd id="next-expiry">—</dd></div>
+      </dl>
+      <p class="hint">Expired records remain leased until the next worker claim reclaims eligible work or moves exhausted leases to dead letter. This summary never changes jobs.</p>
     </section>
     <section class="panel" id="jobs" aria-labelledby="jobs-title" tabindex="-1">
       <div class="panel-head"><div><p class="eyebrow">DELIVERY EXPLORER</p><h2 id="jobs-title">The inbox</h2></div><div class="controls"><label for="state">State</label><select id="state"><option value="">All states</option><option value="queued">Queued</option><option value="leased">Leased</option><option value="succeeded">Succeeded</option><option value="dead_letter">Dead letter</option></select><button id="refresh" type="button">Refresh</button></div></div>
       <p id="status" role="status" aria-live="polite">Connecting to the local inbox…</p>
       <div class="table-wrap"><table><caption class="sr-only">Latest 100 deliveries, newest first. Select a delivery to inspect its payload.</caption><thead><tr><th scope="col">Delivery</th><th scope="col">State</th><th scope="col">Attempts</th><th scope="col">Received</th><th scope="col">Last error</th></tr></thead><tbody id="rows"></tbody></table></div>
-      <p class="hint">Shows at most 100 matching deliveries. Totals include the whole inbox. Refresh manually to inspect current state.</p>
+      <p class="hint">Shows at most 100 matching deliveries. This list is fetched separately from the whole-inbox snapshot above and may reflect a different moment. Refresh manually; no automatic refresh.</p>
     </section>
     <section class="panel detail" aria-labelledby="detail-title"><p class="eyebrow">PAYLOAD INSPECTOR</p><h2 id="detail-title">Select a delivery</h2><p id="detail-meta">Payloads are displayed as plain text. Worker lease tokens stay out of the HTTP API.</p><pre id="payload" tabindex="0" aria-label="Selected delivery JSON payload">No delivery selected.</pre></section>
     <footer><p><strong>Recovery is deliberate.</strong> To replay a dead letter, use <code>relaybox --db inbox.sqlite3 replay JOB_ID</code> in your local terminal.</p><p>At-least-once processing · SQLite WAL · HMAC SHA-256 · Synthetic demo data available with <code>relaybox demo</code></p></footer>
