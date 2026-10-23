@@ -30,5 +30,7 @@ jobs:
         run: python examples/verify_install.py
       - name: Installed ingestion, receipt worker and acknowledgment outside checkout
         run: python examples/verify_worker.py
+      - name: Installed snapshot, verification and new-path recovery outside checkout
+        run: python examples/verify_backup.py
       - name: CLI entry point
         run: relaybox --help
