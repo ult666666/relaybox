@@ -325,6 +325,33 @@ class BackupTests(unittest.TestCase):
             with self.subTest(timeout=timeout), self.assertRaises(ValidationError):
                 self.verify(self.destination, timeout=timeout)
 
+    def test_destination_sidecars_are_preserved_and_prevent_publication(self):
+        Inbox(self.source)
+        for suffix in ("-wal", "-shm", "-journal"):
+            with self.subTest(suffix=suffix):
+                sidecar = Path(str(self.destination) + suffix)
+                sidecar.write_bytes(b"retained sidecar")
+                try:
+                    with self.assertRaisesRegex(ValidationError, "sidecar"):
+                        self.backup(self.source, self.destination)
+                    self.assertFalse(self.destination.exists())
+                    self.assertEqual(sidecar.read_bytes(), b"retained sidecar")
+                finally:
+                    sidecar.unlink(missing_ok=True)
+                    self.destination.unlink(missing_ok=True)
+        self.assertEqual(list(self.root.glob(".relaybox-backup-*")), [])
+
+    def test_verify_rejects_sidecars_without_changing_snapshot_or_sidecar(self):
+        Inbox(self.source)
+        self.backup(self.source, self.destination)
+        before = self.destination.read_bytes()
+        sidecar = Path(str(self.destination) + "-journal")
+        sidecar.write_bytes(b"retained journal")
+        with self.assertRaisesRegex(ValidationError, "sidecar"):
+            self.verify(self.destination)
+        self.assertEqual(self.destination.read_bytes(), before)
+        self.assertEqual(sidecar.read_bytes(), b"retained journal")
+
     def test_real_exclusive_lock_contention_obeys_timeout_and_leaves_no_output(self):
         from relaybox.backup import BackupTimeout
         Inbox(self.source)

@@ -40,10 +40,35 @@ python3 -m relaybox --db .local/demo.sqlite3 work --receipts .local/receipts --m
 
 Python 用户可以调用 `relaybox.worker.run_worker(inbox, handler, ...)` 并传入本地幂等函数，或使用 `ReceiptHandler(path)`。处理器正常返回就尝试确认，普通 `Exception` 就记录失败并按原策略重试或进入死信。确认或失败提交时租约已经失效，只增加 `lost_leases`。`KeyboardInterrupt`/`SystemExit` 继续向外抛出，租约留待过期恢复；收件箱存储错误也向外抛出。处理器运行时间不受领取次数上限约束，没有自动续租线程；长任务必须在到期前显式续租或在租约内完成，外部副作用仍需调用方自行保证幂等。
 
+## 一致备份与新路径恢复演练
+
+0.3.0 提供显式本地备份。不能直接复制正在使用 WAL 的数据库主文件，否则可能遗漏已提交任务。选择已存在、可信且私有的本地目录，以及尚不存在的新文件名：
+
+```bash
+python3 -m relaybox --db .local/demo.sqlite3 backup .local/snapshot.sqlite3 --timeout 10
+python3 -m relaybox verify-backup .local/snapshot.sqlite3
+```
+
+在线备份通过只读事务固定已提交快照，再用 SQLite 在线备份 API 复制；包含已提交 WAL 数据，不包含未提交修改。完成后验证结构、完整性和状态计数，转为无需源 WAL/SHM 文件的单个快照，再以独占硬链接发布。已有目标、符号链接、硬链接或遗留的 `-wal`、`-shm`、`-journal` 文件会被拒绝，不覆盖也不删除。JSON 回执只包含规范路径、结构版本、完整性、任务/状态计数、物理 SHA-256 与文件大小；**数据库备份本身仍包含全部内容和私有租约令牌**，必须妥善保护。
+
+切换到恢复路径前，**停止原服务和所有原工作者**，演练期间保持停止。不要预先初始化恢复目标：
+
+```bash
+python3 -m relaybox --db .local/recovered.sqlite3 restore .local/snapshot.sqlite3
+python3 -m relaybox --db .local/recovered.sqlite3 stats
+python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipts --max-jobs 10
+```
+
+处理前将恢复计数与备份回执比较。尝试次数、重试策略、重放次数及所有租约字段逐字段保留。过期租约在下一次领取时处理；未过期租约仍需等待到期。恢复副本是独立收件箱，无法阻止仍在操作原数据库的工作者。快照之后的工作可能再次执行。数据库备份不包含回执目录，必须单独保留/备份原规范回执；崩溃发生在写回执与确认之间时，同样的回执可避免重写，删除或更改回执会破坏此示例幂等性。外部处理器仍需自己的幂等机制，没有跨数据库的恰好一次保证。
+
+只支持操作者拥有的可信 schema-1 文件，不执行迁移、修复、扩展或文件提供的 SQL，也不构成恶意 SQLite 文件沙箱。父目录别名会规范化，指定文件本身不能是符号链接，文件和目录不能被其他进程并发替换。新文件权限申请 `0600`，受 umask 和平台影响；需要原子硬链接，未认证 Windows ACL 或网络文件系统。超时必须为有限的 0.1–60 秒，默认 10 秒；使用共享单调时限检查 SQLite 查询、备份进度和哈希分块。数据库物理大小和页数乘页大小均不得超过 1 GiB。时限不能中断已阻塞的操作系统 I/O；最终目录元数据不做 fsync，强制终止可遗留私有临时文件，没有断电恢复承诺。`verify-backup` 只读验证静止、无旁文件的 DELETE 日志模式快照；活动 WAL 收件箱先执行 `backup`。
+
+安装后运行 `python examples/verify_backup.py`，在源码目录外验证安装版 0.3.0 的备份 → 验证 → 新路径恢复 → 过期租约领取 → 复用已有回执 → 确认流程。
+
 ## 验证与边界
 
 运行 `python3 -m unittest discover -v`。测试包括真实 HTTP 请求、多个 SQLite 连接并发领取、续租与完成竞争、重复投递、旧工作者拒绝、回执重试和 CLI 退出码。安装后用对应环境的 Python 执行 `examples/verify_worker.py`，验证真实安装版 CLI 的签名接收 → 回执处理 → 确认全流程；`examples/verify_install.py` 验证安装版静态资源。
 
-服务仅监听 IPv4 回环地址，采用明文 HTTP、单个 HMAC 密钥。请求上限 64 KiB，每次套接字读取超时 3 秒，同时处理最多 32 个连接。没有对外投递、账户权限、自动清理、备份或分布式扩展。任何能访问本地服务的进程都可能读取内容。租约令牌只保护此数据库，不能保证外部操作恰好执行一次。
+服务仅监听 IPv4 回环地址，采用明文 HTTP、单个 HMAC 密钥。请求上限 64 KiB，每次套接字读取超时 3 秒，同时处理最多 32 个连接。没有对外投递、账户权限、自动清理、自动备份或分布式扩展。任何能访问本地服务的进程都可能读取内容。租约令牌只保护此数据库，不能保证外部操作恰好执行一次。
 
 项目实现与测试使用了 AI 辅助。请查看 [架构](ARCHITECTURE.md)、[API](API.md)、[验证记录](VERIFICATION.md) 与 [安全说明](../SECURITY.md) 了解真实验证范围和限制。

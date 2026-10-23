@@ -110,6 +110,17 @@ def _source(path):
     return selected
 
 
+def _no_sidecars(path):
+    # A stale hot journal/WAL belongs to a different database lifetime. Never
+    # delete it or publish/verify a supposedly standalone file beside it.
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            Path(str(path) + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        raise ValidationError("standalone snapshot/destination must not have pre-existing SQLite sidecars")
+
+
 def _destination(path):
     selected = _selected(path)
     if not selected.parent.is_dir():
@@ -117,6 +128,7 @@ def _destination(path):
     try:
         selected.lstat()
     except FileNotFoundError:
+        _no_sidecars(selected)
         return selected
     raise ValidationError("destination must not exist (including self, hard links and symlinks)")
 
@@ -205,6 +217,7 @@ def verify_backup(path, *, timeout=10) -> dict:
     """
     deadline = _Deadline(timeout)
     source = _source(path)
+    _no_sidecars(source)
     with _reader(source, deadline) as conn:
         metadata = _metadata(conn, deadline)
         # A standalone backup has no uncheckpointed state outside this file.
@@ -251,6 +264,7 @@ def backup_database(source, destination, *, timeout=10) -> dict:
         with temporary.open("rb") as snapshot:
             os.fsync(snapshot.fileno())
         deadline.remaining()
+        _no_sidecars(destination)
         try:
             os.link(temporary, destination)
         except FileExistsError as exc:

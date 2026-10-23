@@ -2,9 +2,50 @@
 
 Verified locally on macOS arm64 on 23 October 2026. All records and requests used synthetic data. This record distinguishes observed behavior from unverified deployment or reliability claims.
 
+## v0.3.0 consistent snapshots and new-path recovery
+
+The v0.3.0 suite contains **124 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP, 16 CLI subprocess, 30 worker/receipt, and 19 backup/recovery tests. The v0.1.0 and v0.2.0 records/tags are retained as historical evidence. The branch started from clean integrated main `3b4df17d8c8f5252206bb839398170c4e5ea49fd`.
+
+| Interpreter | Exact command | Observed result |
+|---|---|---|
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 124 passed, 3.898 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 124 passed, 4.668 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 124 passed, 4.860 seconds |
+
+All final runs completed without resource warnings. Tests first failed on the absent backup module (11 failures), then missing CLI commands. A later failing schema test found that case-folding declarations accepted changed CHECK string literals; validation now preserves their case. A failing diagnostic test found that the symlink rejection was being rewrapped by the broad path-value handler; the explicit rejection is now preserved. The first full test run passed but revealed unclosed test-fixture connections on Python 3.13; fixtures now explicitly close them. A CHECK-corruption fixture initially expected an integrity diagnostic, but SQLite's read-only integrity scan on the local build omitted that particular CHECK result; the explicit known-state validation still rejected it. The assertion now accepts either rejection, and a separate damaged b-tree test exercises real corruption rejection.
+
+Real WAL tests keep a separate writer open, commit a field into WAL, then leave a later update uncommitted. The published standalone snapshot contains the committed field and excludes the uncommitted value, while source bytes remain unchanged. Another test commits a new row from the actual SQLite backup progress callback during a multi-step copy: the source ends with 81 jobs while the pinned snapshot consistently has the original 80. No synchronization sleeps are used. Temporarily removing the source read transaction made this test fail on inconsistent snapshot metadata. Temporarily removing deadline cancellation from the progress callback made the cancellation test run 19 iterations instead of stopping after its first incomplete step. Both mutations were restored and the complete suites above passed.
+
+Backup tests cover all four states, complete row equality, private token/worker/payload omission from metadata, attempts, per-job policy, replay counts, duplicate/conflict behavior, expired lease reclamation and stale-token rejection after restore. They reject missing, nonregular, empty, foreign, changed-schema, truncated and corrupt sources without source initialization or publication. Existing files/directories, self/hardlink/symlink targets, selected source symlinks, Unicode/spaced paths, trusted ancestor aliases, private POSIX mode, injected publication failure and a real exclusive-create destination collision are exercised. Late review added failing regressions for existing destination SQLite sidecars: the copier now rejects `-wal`, `-shm` and `-journal` entries without deleting them, and verification rejects sidecars before SQLite can attempt recovery.
+
+A real second connection holds a rollback-journal `BEGIN EXCLUSIVE`; a 0.1-second request raises the deadline error and publishes nothing. Actual backup progress is also intercepted solely to advance an injected monotonic clock, proving cancellation before a second copy step and cleanup of private files. Invalid/nonfinite timeout types and the 1 GiB sparse-file bound are checked. The deadline is cooperative; these tests do not claim interruption of a blocked OS I/O syscall or a machine-wide real-time limit.
+
+A fresh final Python 3.13 environment built and installed the final 0.3.0 wheel:
+
+```bash
+python3.13 -m venv .local/backup-final-venv
+.local/backup-final-venv/bin/python -m pip wheel --no-deps --no-cache-dir --wheel-dir .local/backup-final-wheel .
+.local/backup-final-venv/bin/python -m pip install --no-deps --no-index .local/backup-final-wheel/relaybox_inbox-0.3.0-py3-none-any.whl
+.local/backup-final-venv/bin/python examples/verify_install.py
+.local/backup-final-venv/bin/python examples/verify_worker.py
+.local/backup-final-venv/bin/python examples/verify_backup.py
+```
+
+The final wheel was 30,768 bytes with SHA-256 `33cf66ce5cede188f953eaaaaaae558663f09371d32883618af7d8de25711c66`. All three installed checks passed. Their child commands run in temporary directories outside the checkout; the recovery setup uses isolated `python -I`, checks `site-packages`, and asserts both installed metadata and `relaybox.__version__` equal 0.3.0. An earlier run against the old `.venv` failed on its missing worker module, demonstrating that the installed check does not silently import current source.
+
+The new drill creates a synthetic receipt before acknowledgment, leaves the original worker stopped, backs up and verifies the expired lease, restores into a nonexistent Unicode/spaced path, checks every database column, and tests same-byte deduplication plus changed-byte conflict. Installed `work` reclaims the lease at attempt 2, reuses the retained receipt without rewriting bytes or mtime, and acknowledges only the restored database. A repeat restore is rejected without overwrite. Verification does not create the unrelated `--db` destination. Observed output:
+
+```json
+{"installed_backup":"ok","version":"0.3.0","snapshot_jobs":1,"verified_sha256":true,"all_columns_preserved":true,"duplicate_created":false,"summary":{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0},"receipt_reused_without_rewrite":true,"original_state":"leased","restored_state":"succeeded","outside_checkout":true}
+```
+
+The official [Python 3.11 backup API](https://docs.python.org/3.11/library/sqlite3.html#sqlite3.Connection.backup), [SQLite online backup API](https://www.sqlite.org/backup.html), and [SQLite journal/sidecar recovery](https://www.sqlite.org/tempfiles.html) contracts were read before implementation or the relevant sidecar repair. CI is configured to execute the new installed recovery check on Python 3.11/3.13; hosted CI/publication belongs to the parent review and is not claimed here.
+
+Supported trust is operator-owned local schema-1 databases and trusted directories; the allowlist is not authentication or a hostile-SQLite-file sandbox. Verification accepts quiescent DELETE-journal snapshots only. No schema migration, arbitrary source SQL, extension loading or repair was added. The new 1 GiB cap applies to snapshot operations, not all inbox writes. New files request 0600, hard links are required, selected symlinks are refused and ancestor aliases are resolved. Windows ACLs, network filesystems, adversarial concurrent replacement, hard-kill cleanup and power-loss persistence remain unverified; directory metadata is not fsynced. A restored copy cannot fence original workers; stop them before switching. Receipt files are separate retained artifacts, and recovery may repeat effects after the snapshot. No cross-database exactly-once guarantee, new browser behavior, production recovery certification, or external integration was tested.
+
 ## v0.2.0 bounded worker and renewable lease
 
-The current suite contains **102 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP boundary, 13 CLI subprocess, and 30 worker/receipt tests. The original v0.1.0 evidence is retained below as historical evidence.
+The v0.2.0 final suite contained **102 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP boundary, 13 CLI subprocess, and 30 worker/receipt tests. The original v0.1.0 evidence is retained below as historical evidence.
 
 | Interpreter | Exact command | Observed result |
 |---|---|---|
