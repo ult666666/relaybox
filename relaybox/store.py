@@ -204,6 +204,33 @@ class Inbox:
         result.update({row["state"]: row["count"] for row in rows})
         return result
 
+    def metrics(self) -> dict:
+        """One read-only queue snapshot at one validated supplied-clock sample.
+
+        Counts are persisted states; expired leases are not reconciled here.
+        This aggregate scans rows without selecting payload/private columns.
+        """
+        now = self.clock()
+        _number(now, 0, 253402300799, "snapshot_at")
+        with self._connection() as conn:
+            row = conn.execute("""SELECT
+                COUNT(CASE WHEN state='queued' THEN 1 END) AS queued,
+                COUNT(CASE WHEN state='leased' THEN 1 END) AS leased,
+                COUNT(CASE WHEN state='succeeded' THEN 1 END) AS succeeded,
+                COUNT(CASE WHEN state='dead_letter' THEN 1 END) AS dead_letter,
+                COUNT(CASE WHEN state='queued' AND available_at<=:now THEN 1 END) AS queued_ready,
+                COUNT(CASE WHEN state='queued' AND available_at>:now THEN 1 END) AS queued_delayed,
+                COUNT(CASE WHEN state='leased' AND lease_until>:now THEN 1 END) AS leases_active,
+                COUNT(CASE WHEN state='leased' AND lease_until<=:now AND attempts<max_attempts THEN 1 END) AS leases_expired_reclaimable,
+                COUNT(CASE WHEN state='leased' AND lease_until<=:now AND attempts>=max_attempts THEN 1 END) AS leases_expired_exhausted,
+                MAX(CASE WHEN state='queued' AND available_at<=:now THEN :now-available_at END) AS oldest_queued_ready_wait_seconds,
+                MIN(CASE WHEN state='queued' AND available_at>:now THEN available_at END) AS next_retry_at,
+                MIN(CASE WHEN state='leased' AND lease_until>:now THEN lease_until END) AS next_lease_expiry
+                FROM jobs""", {"now": now}).fetchone()
+        result = dict(row)
+        counts = {state: result.pop(state) for state in STATES}
+        return {"schema_version": 1, "snapshot_at": now, "counts": counts, **result}
+
     def claim(self, worker: str, *, lease_seconds=30) -> dict | None:
         _claim_options(worker, lease_seconds)
         with self._connection() as conn:

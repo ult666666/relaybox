@@ -172,3 +172,67 @@ class HTTPTests(unittest.TestCase):
 
     def test_same_origin_read_is_allowed(self):
         self.assertEqual(self.request("GET", "/api/stats", headers={"Origin": f"http://127.0.0.1:{self.port}", "Sec-Fetch-Site": "same-origin"})[0], 200)
+
+
+class MetricsHTTPTests(unittest.TestCase):
+    request = HTTPTests.request
+    raw = HTTPTests.raw
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.inbox = Inbox(Path(cls.tmp.name) / "metrics-http.sqlite3", clock=lambda: 1000)
+        cls.inbox.ingest("private-delivery-id", b'{"private":"hidden-http-payload"}')
+        cls.lease = cls.inbox.claim("private-http-worker", lease_seconds=10)
+        cls.inbox.ingest("second-private-id", b"{}")
+        cls.server = make_server(cls.inbox, b"synthetic-metrics-test-secret", port=0)
+        cls.port = cls.server.server_port
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+        cls.tmp.cleanup()
+
+    def test_metrics_returns_exact_snapshot_without_private_job_fields(self):
+        status, headers, body = self.request("GET", "/api/metrics")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {
+            "schema_version": 1, "snapshot_at": 1000,
+            "counts": {"queued": 1, "leased": 1, "succeeded": 0, "dead_letter": 0},
+            "queued_ready": 1, "queued_delayed": 0, "leases_active": 1,
+            "leases_expired_reclaimable": 0, "leases_expired_exhausted": 0,
+            "oldest_queued_ready_wait_seconds": 0.0, "next_retry_at": None, "next_lease_expiry": 1010.0,
+        })
+        for private in ["private-delivery-id", "hidden-http-payload", "private-http-worker", self.lease["lease_token"], "lease_token", "digest", "last_error"]:
+            self.assertNotIn(private, body.decode())
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(json.loads(self.request("GET", "/api/stats")[2]), {"counts": {"queued": 1, "leased": 1, "succeeded": 0, "dead_letter": 0}})
+        self.assertEqual(json.loads(self.request("GET", "/healthz")[2]), {"status": "ok", "service": "relaybox"})
+
+    def test_metrics_obeys_origin_host_query_and_body_boundary(self):
+        for headers, expected in [({"Host": "attacker.example"}, 421), ({"Origin": "https://attacker.example"}, 403), ({"Sec-Fetch-Site": "cross-site"}, 403)]:
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request("GET", "/api/metrics", headers=headers)[0], expected)
+        self.assertEqual(self.request("GET", "/api/metrics?extra=1")[0], 404)
+        self.assertEqual(self.request("GET", "/api/metrics", body=b"x", headers={"Content-Length": "1"})[0], 400)
+        same_origin = {"Origin": f"http://127.0.0.1:{self.port}", "Sec-Fetch-Site": "same-origin"}
+        self.assertEqual(self.request("GET", "/api/metrics", headers=same_origin)[0], 200)
+        request = f"GET /api/metrics HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".encode()
+        self.assertEqual(self.raw(request)[0], 400)
+
+    def test_metrics_storage_error_is_explicit_and_does_not_leak_diagnostics(self):
+        import sqlite3
+        from unittest.mock import patch
+        with patch.object(self.inbox, "metrics", side_effect=sqlite3.OperationalError("private storage detail")):
+            status, _, body = self.request("GET", "/api/metrics")
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "database unavailable"})
+        with patch.object(self.inbox, "clock", return_value=float("nan")):
+            status, _, body = self.request("GET", "/api/metrics")
+        self.assertEqual(status, 400)
+        self.assertNotIn("NaN", body.decode())

@@ -84,6 +84,14 @@ python3 -m relaybox --db .local/demo.sqlite3 fail JOB_ID --token TOKEN --error "
 
 Commands return JSON; successful commands exit `0`, invalid arguments or failed operations exit `2`. `work` exits `1` if any handler failure was recorded or ownership was lost before completion. An empty claim is successful and returns `{"job": null}`. Replay is deliberately explicit and only accepts dead letters. Each replay resets the attempt budget; a local operator can request further replays. Worker operations stay in the CLI/library, so the dashboard cannot mutate jobs.
 
+## Understand an idle worker
+
+Version 0.4.0 adds a read-only operations summary. Use Refresh in the dashboard, or GET `/api/metrics` from the local server, to distinguish queued work that is ready now from delayed retries, and active leases from expired leases. The four state cards still show persisted totals: an expired exhausted lease stays in **Leased** until a worker's next claim moves it to dead letter. Viewing diagnostics never claims or reconciles a job.
+
+The summary labels its inbox snapshot separately from the latest 100 matching deliveries. Readiness and expiry use one clock sample and one database statement; the list is a separate request and can reflect a different commit. Oldest ready wait means seconds since `available_at`, not time since ingestion or processing latency. Missing wait/retry/expiry values are explicit descriptions rather than zero dates. Upcoming times use your browser's local timezone. Refresh is manual. A failed section clears its values and displays an error while the other section remains usable; older responses cannot replace a newer refresh.
+
+Library users can call `inbox.metrics()` on their existing `Inbox` instance. Normal `Inbox(path)` construction still initializes a missing database and applies the existing WAL setup; `metrics()` itself performs only a SELECT. Clock values must be finite Unix seconds from 0 through 253402300799 (through year 9999); booleans and invalid ranges raise `ValidationError`. This is a local diagnostic snapshot, not a monitor, throughput estimate, completion promise or service-health certificate. Aggregates can scan all rows, though they do not select payloads or private job fields. See the [exact metrics contract](docs/API.md#queue-metrics).
+
 ## Back up and drill recovery
 
 Version 0.3.0 adds consistent local SQLite snapshots. Never copy just a live inbox's main file: committed jobs may still be in its WAL. Choose an existing trusted private directory and fresh destination names:

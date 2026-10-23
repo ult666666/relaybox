@@ -1,4 +1,4 @@
-"""Verify an installed 0.3.0 recovery drill outside the source checkout.
+"""Verify an installed 0.4.0 recovery drill outside the source checkout.
 
 Only synthetic local files are used. The original worker is stopped before the
 snapshot and stays stopped: a restored database cannot fence that original.
@@ -35,7 +35,7 @@ from pathlib import Path
 import relaybox
 from relaybox.store import Inbox
 from relaybox.worker import ReceiptHandler
-assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.3.0"
+assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.4.0"
 assert "site-packages" in str(Path(relaybox.__file__).resolve())
 inbox = Inbox(sys.argv[1], clock=lambda: 1000)
 inbox.ingest("installed-recovery-001", b'{"synthetic":true,"journey":"recovery"}')
