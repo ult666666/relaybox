@@ -133,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
             elif re.fullmatch(r"/api/jobs/[1-9][0-9]{0,17}", path.path) and not path.query:
                 job = self.server.inbox.get(int(path.path.rsplit("/", 1)[1]))
                 self._respond(200, {"job": self._safe_job(job)})
+            elif path.path == "/api/metrics" and not path.query:
+                self._respond(200, self.server.inbox.metrics())
             elif path.path == "/api/stats" and not path.query:
                 self._respond(200, {"counts": self.server.inbox.stats()})
             elif path.path == "/healthz" and not path.query:
