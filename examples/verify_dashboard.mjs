@@ -138,6 +138,8 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.id), "refresh");
   await page.keyboard.press("Enter");
   await ready();
+  await page.waitForFunction(() => !document.getElementById("refresh").disabled);
+  assert.equal(await page.evaluate(() => document.activeElement.id), "refresh");
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await page.getByLabel("State", {exact: true}).isVisible(), true);

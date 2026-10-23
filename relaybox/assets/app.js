@@ -81,7 +81,7 @@ function renderJobs(jobs) {
 async function refresh() {
   const current = ++generation;
   const state = byId("state").value;
-  byId("refresh").disabled = true;
+  byId("refresh").setAttribute("aria-busy", "true");
   clearMetrics();
   byId("metrics-status").dataset.state = "loading";
   byId("metrics-status").textContent = "Loading inbox snapshot…";
@@ -105,7 +105,7 @@ async function refresh() {
     byId("status").textContent = `Deliveries unavailable: ${error.message}. Check the local server and refresh.`;
   });
   await Promise.allSettled([metrics, jobs]);
-  if (current === generation) byId("refresh").disabled = false;
+  if (current === generation) byId("refresh").setAttribute("aria-busy", "false");
 }
 byId("state").addEventListener("change", refresh);
 byId("refresh").addEventListener("click", refresh);

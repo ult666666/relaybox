@@ -32,10 +32,10 @@ Files: modify `relaybox/store.py`, `relaybox/server.py`; create `tests/test_metr
 
 Interface: `Inbox.metrics() -> dict` with exactly `schema_version`, `snapshot_at`, four persisted `counts`, `queued_ready`, `queued_delayed`, `leases_active`, `leases_expired_reclaimable`, `leases_expired_exhausted`, `oldest_queued_ready_wait_seconds`, `next_retry_at`, `next_lease_expiry`. HTTP GET `/api/metrics` returns it directly, without query/body.
 
-- [ ] Write/run failing logical-clock tests for empty nulls, exact readiness/expiry, mixed stored retry policies, all states, secret omission, one clock sample, invalid clocks, unchanged complete rows and concurrent snapshot consistency.
-- [ ] Implement one SQL aggregate SELECT, fixed-sized result and existing controlled ValidationError. No state mutation, payload read or calls combining stats/list across commits.
-- [ ] Add/run failing actual HTTP metrics tests: exact object, no private fields, query/body rejection, Host/Origin/Fetch Metadata boundary, same-origin, storage error and unchanged stats/liveness contracts.
-- [ ] Implement route within existing boundary; run `python3.13 -m unittest discover -v` expecting all tests pass; commit feature/API.
+- [x] Write/run failing logical-clock tests for empty nulls, exact readiness/expiry, mixed stored retry policies, all states, secret omission, one clock sample, invalid clocks, unchanged complete rows and concurrent snapshot consistency.
+- [x] Implement one SQL aggregate SELECT, fixed-sized result and existing controlled ValidationError. No state mutation, payload read or calls combining stats/list across commits.
+- [x] Add/run failing actual HTTP metrics tests: exact object, no private fields, query/body rejection, Host/Origin/Fetch Metadata boundary, same-origin, storage error and unchanged stats/liveness contracts.
+- [x] Implement route within existing boundary; run `python3.13 -m unittest discover -v` expecting all tests pass; commit feature/API.
 
 ## Task 2: compact operator summary and browser checks
 
@@ -43,15 +43,15 @@ Files: modify three `relaybox/assets/` files; create focused `tests/browser_fixt
 
 Consumes Task 1 metrics object. UI retains four persisted-state cards, labels leased totals as including expired records, and adds an accessible operations definition list with readiness/expiry partitions, wait seconds, local upcoming times and explicit missing-value descriptions. Snapshot and latest-100 list are labeled separate requests. Exhausted expired leases are described as waiting for reconciliation on claim.
 
-- [ ] Write/run real Chromium checks before UI implementation (existing module path supplied): mixed logical fixture expected values, empty nulls, manual refresh after clock/state change, invalidated failed metrics with usable list, fresh metrics with failed list, stale response ordering, plain-text hostile payload, no page errors, keyboard and 390px width.
-- [ ] Implement independent refresh sections using Promise.allSettled with generation guard, clear failed metrics/list data, preserve detail guard/textContent/manual control and usable keyboard focus.
-- [ ] Run Chromium checks plus full Python suite; inspect a screenshot locally; commit dashboard and focused reusable dev verification. No runtime browser dependency and no new browser CI job unless justified by available infrastructure.
+- [x] Write/run real Chromium checks before UI implementation (existing module path supplied): mixed logical fixture expected values, empty nulls, manual refresh after clock/state change, invalidated failed metrics with usable list, fresh metrics with failed list, stale response ordering, plain-text hostile payload, no page errors, keyboard and 390px width.
+- [x] Implement independent refresh sections using Promise.allSettled with generation guard, clear failed metrics/list data, preserve detail guard/textContent/manual control and usable keyboard focus.
+- [x] Run Chromium checks plus full Python suite; inspect a screenshot locally; commit dashboard and focused reusable dev verification. No runtime browser dependency and no new browser CI job unless justified by available infrastructure.
 
 ## Task 3: fresh package and handoff
 
 Files: modify version metadata/`__version__`, `examples/verify_install.py` and `examples/verify_backup.py` version expectation; update README, API, architecture, Chinese guide and verification record.
 
-- [ ] Extend installed check to require 0.4.0 metadata/module version, assert actual HTTP metrics and compare all packaged asset bytes through isolated outside-checkout installed resource reads. Run against prior install first and observe failure.
-- [ ] Set 0.4.0, run fresh wheel/install, all three installed scripts; run full Python suites on 3.11/3.13/3.15 and final Chromium check.
-- [ ] Document exact fields, predicates, null/time/range semantics, read-only/no-reconciliation behavior, local snapshot versus separate list, manual refresh/error policy, linear scan limits, constructor initialization and liveness scope.
-- [ ] Self-review exact diff/spec, `git diff --check`, record all red/green results/commands/commits/limits in owned report, commit and hand off clean branch for parent independent review. No eight-hour or hosted-CI/publication claim.
+- [x] Extend installed check to require 0.4.0 metadata/module version, assert actual HTTP metrics and compare all packaged asset bytes through isolated outside-checkout installed resource reads. Run against prior install first and observe failure.
+- [x] Set 0.4.0, run fresh wheel/install, all three installed scripts; run full Python suites on 3.11/3.13/3.15 and final Chromium check.
+- [x] Document exact fields, predicates, null/time/range semantics, read-only/no-reconciliation behavior, local snapshot versus separate list, manual refresh/error policy, linear scan limits, constructor initialization and liveness scope.
+- [x] Self-review exact diff/spec, `git diff --check`, record all red/green results/commands/commits/limits in owned report, commit and hand off clean branch for parent independent review. No eight-hour or hosted-CI/publication claim.

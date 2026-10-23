@@ -4,6 +4,7 @@ Run with the interpreter into which `pip install .` installed RelayBox.
 Uses only synthetic data, an ephemeral database, and loopback HTTP.
 """
 
+import base64
 import hashlib
 import hmac
 import http.client
@@ -19,8 +20,20 @@ import time
 def main():
     with tempfile.TemporaryDirectory(prefix="relaybox-install-") as directory:
         database = str(Path(directory) / "demo.sqlite3")
-        command = [sys.executable, "-m", "relaybox", "--db", database]
-        demo = subprocess.run(command + ["demo"], cwd=directory, text=True, capture_output=True, check=True)
+        probe = subprocess.run([sys.executable, "-I", "-c", """
+import base64, importlib.metadata, json
+from importlib.resources import files
+from pathlib import Path
+import relaybox
+assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.4.0"
+assert "site-packages" in str(Path(relaybox.__file__).resolve())
+assets = {route: base64.b64encode(files("relaybox").joinpath("assets", name).read_bytes()).decode()
+          for route, name in [("/", "index.html"), ("/assets/app.js", "app.js"), ("/assets/style.css", "style.css")]}
+print(json.dumps({"version": relaybox.__version__, "assets": assets}))
+"""], cwd=directory, text=True, capture_output=True, check=True, timeout=15)
+        installed = json.loads(probe.stdout)
+        command = [sys.executable, "-I", "-m", "relaybox", "--db", database]
+        demo = subprocess.run(command + ["demo"], cwd=directory, text=True, capture_output=True, check=True, timeout=15)
         assert json.loads(demo.stdout)["counts"] == {"queued": 1, "leased": 1, "succeeded": 1, "dead_letter": 1}
         with socket.socket() as available:
             available.bind(("127.0.0.1", 0))
@@ -42,13 +55,25 @@ def main():
                     time.sleep(0.05)
             else:
                 raise AssertionError("installed server failed to start")
-            for path, expected in [("/", b"RelayBox"), ("/assets/app.js", b"textContent"), ("/assets/style.css", b"color-scheme")]:
+            for path, encoded in installed["assets"].items():
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
                 connection.request("GET", path)
                 response = connection.getresponse()
                 assert response.status == 200
-                assert expected in response.read(), path
+                assert response.read() == base64.b64decode(encoded), path
                 connection.close()
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection.request("GET", "/api/metrics")
+            response = connection.getresponse()
+            assert response.status == 200
+            metrics = json.loads(response.read())
+            connection.close()
+            assert set(metrics) == {"schema_version", "snapshot_at", "counts", "queued_ready", "queued_delayed", "leases_active", "leases_expired_reclaimable", "leases_expired_exhausted", "oldest_queued_ready_wait_seconds", "next_retry_at", "next_lease_expiry"}
+            assert metrics["schema_version"] == 1 and 0 <= metrics["snapshot_at"] <= 253402300799
+            assert metrics["counts"] == {"queued": 1, "leased": 1, "succeeded": 1, "dead_letter": 1}
+            assert (metrics["queued_ready"], metrics["queued_delayed"], metrics["leases_active"], metrics["leases_expired_reclaimable"], metrics["leases_expired_exhausted"]) == (1, 0, 1, 0, 0)
+            assert metrics["oldest_queued_ready_wait_seconds"] >= 0
+            assert metrics["next_retry_at"] is None and metrics["next_lease_expiry"] > metrics["snapshot_at"]
             body = b'{"synthetic":true,"message":"installed smoke test"}'
             timestamp = str(int(time.time()))
             delivery = "installed-001"
@@ -65,7 +90,8 @@ def main():
                 statuses.append(response.status)
                 connection.close()
             print(json.dumps({"installed_cli": "ok", "demo_states": 4, "dashboard_assets": 3,
-                              "ingest_statuses": statuses, "source_directory_import": False}))
+                              "ingest_statuses": statuses, "source_directory_import": False,
+                              "version": installed["version"], "metrics_http": True, "asset_bytes_equal": True}))
         finally:
             server.terminate()
             try:

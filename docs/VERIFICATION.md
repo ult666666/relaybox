@@ -2,6 +2,55 @@
 
 Verified locally on macOS arm64 on 23 October 2026. All records and requests used synthetic data. This record distinguishes observed behavior from unverified deployment or reliability claims.
 
+## v0.4.0 queue readiness and expiry snapshot
+
+Started from clean released main `dcf8cd27d6d1a12945af95ec909c8acee4562e0f`. The 0.4.0 suite contains **135 tests**: 6 authentication, 36 storage/state-machine, 7 queue metrics, 20 HTTP, 16 CLI, 30 worker/receipt and 20 backup/recovery tests. All preceding release evidence is retained below.
+
+| Interpreter | Exact command | Observed result |
+|---|---|---|
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 135 passed, 4.326 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 135 passed, 5.070 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 135 passed, 5.250 seconds |
+
+Seven initial metrics tests failed on the missing method, and three new HTTP tests failed on the absent route. Fixed-clock oracles then verified empty explicit nulls, exact ready/expiry boundaries, all four persisted states, mixed stored attempt policies, fractional readiness wait, one clock sample, inclusive timestamp limits and controlled invalid clock values. Complete persisted rows are equal before/after diagnostics, including after clock advancement alone changes derived values. An actual SQLite authorizer rejects private/payload column reads during the metrics call, proving the aggregate does not select those fields.
+
+A real reader is paused during aggregate execution using trace/progress callbacks. A second connection commits 200 queued rows to succeeded while the reader is active; the returned object retains 200 queued-ready jobs and their original 100-second wait together, while the next call reports 200 succeeded and no ready wait. No sleeps, substituted SQL results or stats/list mixing are used. The first fixture attempted to install the progress handler inside a trace callback, which did not affect that already-running statement on the local runtime; installing it at connection creation and arming it from SELECT trace produced the required actual-read synchronization. The implementation uses one aggregate SELECT and one validated supplied-clock sample.
+
+HTTP tests exercise the exact metrics object and private-value omission, Host/Origin/Fetch Metadata, duplicate framing headers, query/body rejection, same-origin success, explicit storage failure and nonfinite-clock rejection. Existing `/api/stats` and process-liveness `/healthz` shapes remain unchanged. All final suite logs are free of ResourceWarning/FAILED/ERROR entries.
+
+The extended installed check first failed against the old 0.3.0 wheel's version assertion. A fresh final 0.4.0 wheel was then built and installed after the keyboard-focus fix:
+
+```bash
+python3.13 -m venv .local/queue-final-venv
+.local/queue-final-venv/bin/python -m pip wheel --no-deps --no-cache-dir --wheel-dir .local/queue-final-wheel .
+.local/queue-final-venv/bin/python -m pip install --no-deps --no-index .local/queue-final-wheel/relaybox_inbox-0.4.0-py3-none-any.whl
+.local/queue-final-venv/bin/python examples/verify_install.py
+.local/queue-final-venv/bin/python examples/verify_worker.py
+.local/queue-final-venv/bin/python examples/verify_backup.py
+```
+
+The final wheel was 33,288 bytes, SHA-256 `e6f4e4ea2b2bb53073b956c33b95237fa473c57a5053d1049d873314ee19b93a`. Every command exited 0. Isolated `python -I` child processes outside the checkout assert module/metadata version 0.4.0 in site-packages, read the three installed asset resources, and compare actual HTTP response bytes with those installed bytes. Actual HTTP `/api/metrics` is checked for all fields, persisted counts, readiness/active partitions and nullable times. Existing signed ingestion/duplicate, receipt worker and backup/restore drills pass on the same installed wheel.
+
+```json
+{"installed_cli":"ok","demo_states":4,"dashboard_assets":3,"ingest_statuses":[202,200],"source_directory_import":false,"version":"0.4.0","metrics_http":true,"asset_bytes_equal":true}
+```
+
+Optional development browser verification used the existing external Playwright **1.61.1** module and its Chromium; no browser/npm runtime dependency was added:
+
+```bash
+node examples/verify_dashboard.mjs /Users/prince/Documents/Codex/2026-10-23/while/work/impact-ledger/node_modules/playwright python3.13
+```
+
+The script starts a real loopback HTTP server with a private SQLite fixture and logical clock, controlled only over test-process stdin. The initial red run failed on the absent operations summary. Green checks cover mixed exact values, explicit empty/null descriptions, manual refresh after clock-only/state changes, persisted leased counts after expiry, independent failed metrics and failed list responses, stale metrics ordering, stale detail ordering, safe hostile text, keyboard interaction and 390px mobile width. Failures and response delays are deliberately simulated at the browser transport boundary; fixture data/metrics/HTML come from the actual local application. A later self-review assertion found that disabling Refresh dropped keyboard focus; keeping it focusable with an accessible busy indicator fixed that failing browser test. Temporarily removing the metrics generation guard caused the held-old-response check to fail with ready count 2 instead of 4; the guard was restored before final verification.
+
+```json
+{"chromium":"ok","real_http":true,"logical_clock":true,"mixed_empty_refresh":true,"independent_failures":true,"stale_metrics_and_detail":true,"keyboard_mobile":true,"injected_elements":0,"page_errors":0}
+```
+
+Desktop and mobile screenshots were saved under ignored `.local/queue-dashboard-desktop.png` and `.local/queue-dashboard-mobile.png` and opened for visual inspection. The summary stays compact in four desktop/two mobile columns, labels wrap, no whole-document horizontal overflow was observed, and the delivery table retains its scroll area. This is focused Chromium/keyboard coverage, not a full accessibility or cross-browser certification. The browser script is optional dev tooling; hosted browser CI is not claimed. Existing CI runs the extended installed HTTP/asset check through its current Python job.
+
+Metrics are local read-only diagnostics, not a monitoring service, automatic reconciler, throughput/latency estimate, completion assurance or service-health certificate. Counts/ages/times share one SQL snapshot, but the dashboard's latest-100 list is a separate request and can reflect a different commit. One validated clock sample is not a distributed time guarantee. Wait means time since readiness, not creation. Nulls remain explicit. SQL can scan every job despite fixed result size and no selected payload columns. Normal Inbox construction still initializes/configures a database; only the metrics operation is read-only. No new state transition, schema change, background refresh, runtime dependency, remote collector, public backend, eight-hour run, hosted CI result or remote publication is claimed. Parent independent review/publication remains separate.
+
 ## v0.3.0 consistent snapshots and new-path recovery
 
 The v0.3.0 suite contains **125 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP, 16 CLI subprocess, 30 worker/receipt, and 20 backup/recovery tests. The v0.1.0 and v0.2.0 records/tags are retained as historical evidence. The branch started from clean integrated main `3b4df17d8c8f5252206bb839398170c4e5ea49fd`.

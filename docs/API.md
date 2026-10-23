@@ -10,11 +10,38 @@ Base URL: `http://127.0.0.1:8787`. Every API response is UTF-8 JSON with `Cache-
 | GET | `/assets/app.js`, `/assets/style.css` | Bundled assets |
 | GET | `/healthz` | Process-level health: `{"status":"ok","service":"relaybox"}`; not a storage health check |
 | POST | `/webhooks` | Verify and durably ingest a delivery |
+| GET | `/api/metrics` | Read-only [queue metrics](#queue-metrics), returned directly as one snapshot object |
 | GET | `/api/stats` | `{"counts":{"queued":0,"leased":0,"succeeded":0,"dead_letter":0}}` |
 | GET | `/api/jobs?state=queued&limit=100` | Latest summaries in descending ID order; state optional; limit 1–500, default 100 |
 | GET | `/api/jobs/1` | Detail including parsed `payload`; excludes lease token |
 
 Unknown routes return `404`. Unsupported known methods return `405` (unrecognized HTTP methods use the standard parser's JSON `501`). Duplicate/unknown list parameters return `400`. No worker or replay mutation route is exposed over HTTP.
+
+## Queue metrics
+
+`Inbox.metrics() -> dict` and GET `/api/metrics` return exactly the following fields. No query parameters or GET body are accepted (queries follow the existing unmatched-route 404 contract; a body is 400). Host, Origin, Fetch Metadata and common request/header boundaries are unchanged. HTTP uses `Cache-Control: no-store`; no IDs, digests, tokens, workers, error text or payloads are returned.
+
+| Field | Meaning / unit |
+|---|---|
+| `schema_version` | Current inbox database schema, 1 |
+| `snapshot_at` | One supplied-clock sample, Unix seconds |
+| `counts` | Integer `queued`, `leased`, `succeeded`, `dead_letter` persisted totals |
+| `queued_ready` | Queued rows with `available_at <= snapshot_at` |
+| `queued_delayed` | Queued rows with `available_at > snapshot_at` |
+| `leases_active` | Leased rows with `lease_until > snapshot_at` |
+| `leases_expired_reclaimable` | Leased rows with `lease_until <= snapshot_at` and `attempts < max_attempts` |
+| `leases_expired_exhausted` | Leased rows with `lease_until <= snapshot_at` and `attempts >= max_attempts` |
+| `oldest_queued_ready_wait_seconds` | Maximum `snapshot_at - available_at` among ready queued rows; null when none |
+| `next_retry_at` | Minimum future queued `available_at`, Unix seconds; null when none |
+| `next_lease_expiry` | Minimum active `lease_until`, Unix seconds; null when none |
+
+At exact readiness a queued row is ready; at exact lease expiry it is expired. All waits are nonnegative and measure readiness waiting, not `created_at` age or end-to-end latency. Null time/age values are present explicitly, never omitted or replaced with zero. Stored per-job attempt policies govern the expired partition. Expired exhausted records remain persisted leased until ordinary `claim` reconciles them; diagnostics performs no transition.
+
+The method samples `Inbox.clock` once, accepts finite int/float seconds in the inclusive range 0–253402300799 (through year 9999, suitable for browser date rendering), and rejects booleans, other types, nonfinite, negative or larger values with `ValidationError`. Fractional seconds are preserved. One aggregate SQL statement computes counts, partitions and times from the same actual SQLite snapshot, without enumerating payload/private columns. The returned object has fixed size; the SQL scan may visit every row. No constant-time or large-scale performance claim is made. SQLite storage errors propagate; HTTP retains explicit database-unavailable 503 handling.
+
+Call this on an existing `Inbox`. Construction is unchanged: `Inbox(path)` initializes missing databases and configures WAL; metrics itself only reads data. The snapshot is local and finite, reflecting a database statement and a sampled application clock rather than a distributed time guarantee. It does not poll, reconcile leases, schedule work or certify completion. `/api/stats` retains its original persisted counts response, and `/healthz` remains process liveness rather than queue readiness or completion.
+
+The dashboard takes its four cards and operations summary from metrics, and obtains the latest-100 list separately. It labels those separate scopes/instants, shows local browser times and descriptive unavailable markers, and refreshes only on user action. Each section renders as soon as its own request succeeds; a failed section clears its values and displays failure text without hiding successful data in the other section. Counts/times clear while a new snapshot loads, so old values cannot silently look current. Refresh remains focusable while busy, preserving keyboard focus and allowing an explicit retry; generation checks ignore older refresh and detail responses. There is no public hosted backend or automatic telemetry collector.
 
 ## Signed ingestion
 
