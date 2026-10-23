@@ -28,5 +28,7 @@ jobs:
         run: python -m pip install .
       - name: Installed CLI and packaged HTTP assets outside checkout
         run: python examples/verify_install.py
+      - name: Installed ingestion, receipt worker and acknowledgment outside checkout
+        run: python examples/verify_worker.py
       - name: CLI entry point
         run: relaybox --help

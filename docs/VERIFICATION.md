@@ -2,9 +2,49 @@
 
 Verified locally on macOS arm64 on 23 October 2026. All records and requests used synthetic data. This record distinguishes observed behavior from unverified deployment or reliability claims.
 
+## v0.2.0 bounded worker and renewable lease
+
+The current suite contains **96 tests**: 6 authentication, 36 storage/state-machine, 17 live HTTP boundary, 13 CLI subprocess, and 24 worker/receipt tests. The original v0.1.0 evidence is retained below as historical evidence.
+
+| Interpreter | Exact command | Observed result |
+|---|---|---|
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 96 passed, 2.600 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 96 passed, 3.246 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 96 passed, 3.340 seconds |
+
+Tests were written before the new interfaces; the first run failed on absent `Inbox.renew`, worker module, and CLI commands. Renewal tests cover exact expiry, wrong and stale tokens, never-shortening extension, unchanged ownership/attempts, validation, missing jobs, deterministic write-lock clock sampling, and concurrent renewal/completion. The existing trace-callback/event synchronization is reused without timing sleeps. A new out-of-range integer case exposed `math.isfinite` raising `OverflowError` before the bounds check; checking range first now returns the documented `ValidationError`.
+
+Worker tests exercise successful ack, claim bounds, validation before claiming, empty/ready-empty stop, retry/dead-letter policy, explicit in-handler renewal, lost leases on ack and fail, real SQLite completion errors, bounded diagnostics, and KeyboardInterrupt/SystemExit recovery. A handler-dictionary mutation test was checked by temporarily using the modified ID/token for completion: both success/failure cases failed with `KeyError`, and both pass when the original claim capability is retained.
+
+Receipt tests cover repeat after lease expiry/reclaim without rewriting, shared identity across databases, distinct IDs with identical bodies, exact-byte digest differences, hostile legal IDs, conflict/corruption/noncanonical contents, symlink and nonregular targets, private POSIX permissions, concurrent identical publication, and cleanup on publication failure. A focused failing compatibility test drove trusted ancestor canonicalization: normal macOS `/var` aliases work while the selected directory itself and final receipt entries still reject symlinks. An injected publication collision with no retained file now fails explicitly instead of reporting success without an effect. CLI subprocess tests exercise exits 0, 1 and 2; the lost-lease case injects only logical clock samples while retaining real CLI parsing, SQLite transitions, and receipt files.
+
+The 0.2.0 wheel was built and installed into a fresh Python 3.13 virtual environment, then reinstalled after final source changes:
+
+```bash
+python3.13 -m venv .local/worker-venv
+.local/worker-venv/bin/python -m pip wheel --no-deps --no-cache-dir --wheel-dir .local/worker-wheel .
+.local/worker-venv/bin/python -m pip install --force-reinstall --no-deps --no-index .local/worker-wheel/relaybox_inbox-0.2.0-py3-none-any.whl
+.local/worker-venv/bin/python examples/verify_install.py
+.local/worker-venv/bin/python examples/verify_worker.py
+```
+
+Both checks run their child processes outside the checkout. The new worker check invokes the installed `relaybox` entry point, starts its server on an ephemeral loopback port, signs synthetic file bytes through the CLI, ingests them twice (202/200), processes a single receipt, verifies persisted `succeeded` state and token omission, and checks empty work and invalid configuration. The existing installed-service check confirms all three packaged dashboard assets and the original demo behavior. Installed package metadata and `relaybox.__version__` both report 0.2.0 from the virtual environment's site-packages.
+
+Observed installed-worker output:
+
+```json
+{"installed_worker":"ok","ingest_statuses":[202,200],"summary":{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0},"receipt_files":1,"final_state":"succeeded","outside_checkout":true}
+```
+
+CI now includes this bounded installed-worker journey on Python 3.11 and 3.13. This local record does not claim hosted CI or publication completed. There is no automatic lease-renewal thread or handler timeout; external effects still require caller idempotency. Receipt checks assume trusted local directories and hard-link support, and do not certify Windows ACLs, adversarial concurrent directory replacement, power-loss durability, or distributed exactly-once processing. The final link's directory metadata is not fsynced; a hard kill may leave temporary files. No additional browser interaction, load test or external integration was performed in this wave.
+
+## v0.1.0 historical verification
+
+The following sections preserve the original release evidence.
+
 ## Automated suite
 
-The final suite contains **59 tests**: 6 authentication checks, 28 storage/state-machine checks, 17 live HTTP boundary checks, and 8 CLI subprocess checks. Tests use actual SQLite files and independent connections; HTTP tests bind an ephemeral loopback port and send real HTTP/TCP requests.
+The v0.1.0 final suite contained **59 tests**: 6 authentication checks, 28 storage/state-machine checks, 17 live HTTP boundary checks, and 8 CLI subprocess checks. Tests use actual SQLite files and independent connections; HTTP tests bind an ephemeral loopback port and send real HTTP/TCP requests.
 
 | Interpreter | Exact command | Observed result |
 |---|---|---|

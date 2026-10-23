@@ -69,13 +69,23 @@ def parse_payload(body: bytes) -> dict:
 
 
 def _number(value, minimum, maximum, name):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not minimum <= value <= maximum:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum or not math.isfinite(value):
         raise ValidationError(f"{name} must be between {minimum} and {maximum}")
 
 
 def _job_id(value):
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2 ** 63 - 1:
         raise ValidationError("job ID must be a positive signed 64-bit integer")
+
+
+def _claim_options(worker, lease_seconds):
+    if not isinstance(worker, str) or not worker.strip() or len(worker) > 128:
+        raise ValidationError("worker must contain 1–128 characters")
+    try:
+        worker.encode("utf-8")
+    except UnicodeError as exc:
+        raise ValidationError("invalid worker text") from exc
+    _number(lease_seconds, 0.001, 3600, "lease_seconds")
 
 
 class Inbox:
@@ -195,13 +205,7 @@ class Inbox:
         return result
 
     def claim(self, worker: str, *, lease_seconds=30) -> dict | None:
-        if not isinstance(worker, str) or not worker.strip() or len(worker) > 128:
-            raise ValidationError("worker must contain 1–128 characters")
-        try:
-            worker.encode("utf-8")
-        except UnicodeError as exc:
-            raise ValidationError("invalid worker text") from exc
-        _number(lease_seconds, 0.001, 3600, "lease_seconds")
+        _claim_options(worker, lease_seconds)
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = self.clock()
@@ -221,6 +225,24 @@ class Inbox:
             job = conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
             conn.commit()
             return self._job(job)
+
+    def renew(self, job_id: int, token: str, *, lease_seconds=30) -> dict:
+        """Extend current unexpired ownership without changing its token/attempt."""
+        _job_id(job_id)
+        _number(lease_seconds, 0.001, 3600, "lease_seconds")
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["state"] != "leased" or row["lease_token"] != token or row["lease_until"] <= now:
+                raise InvalidTransition("a current unexpired lease token is required")
+            conn.execute("UPDATE jobs SET lease_until=?,updated_at=? WHERE id=?",
+                         (max(row["lease_until"], now + lease_seconds), now, job_id))
+            renewed = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            conn.commit()
+            return self._job(renewed)
 
     def _complete(self, job_id: int, token: str, error: str | None):
         _job_id(job_id)

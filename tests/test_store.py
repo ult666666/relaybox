@@ -287,3 +287,101 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(replayed["created_at"], 1000)
         self.assertEqual(replayed["updated_at"], 1011)
         self.assertEqual(replayed["available_at"], 1011)
+
+    def test_renew_extends_current_lease_without_changing_ownership(self):
+        self.put()
+        claim = self.inbox.claim("worker", lease_seconds=10)
+        self.now = 1005
+        renewed = self.inbox.renew(claim["id"], claim["lease_token"], lease_seconds=20)
+        self.assertEqual(renewed["lease_until"], 1025)
+        self.assertEqual(renewed["updated_at"], 1005)
+        for field in ["attempts", "worker", "lease_token", "state", "payload"]:
+            self.assertEqual(renewed[field], claim[field])
+        self.now = 1011
+        self.inbox.ack(claim["id"], claim["lease_token"])
+        self.assertEqual(self.inbox.get(claim["id"])["state"], "succeeded")
+
+    def test_renew_never_shortens_existing_lease(self):
+        self.put()
+        claim = self.inbox.claim("worker", lease_seconds=30)
+        self.now = 1001
+        renewed = self.inbox.renew(claim["id"], claim["lease_token"], lease_seconds=1)
+        self.assertEqual(renewed["lease_until"], 1030)
+
+    def test_renew_rejects_wrong_token_and_exact_expiry(self):
+        self.put()
+        claim = self.inbox.claim("worker", lease_seconds=10)
+        with self.assertRaises(InvalidTransition):
+            self.inbox.renew(claim["id"], "wrong")
+        self.now = 1010
+        with self.assertRaises(InvalidTransition):
+            self.inbox.renew(claim["id"], claim["lease_token"])
+        self.assertEqual(self.inbox.get(claim["id"])["lease_until"], 1010)
+
+    def test_renew_rejects_stale_token_after_reclaim(self):
+        self.put()
+        old = self.inbox.claim("old", lease_seconds=10)
+        self.now = 1010
+        current = self.inbox.claim("new", lease_seconds=20)
+        with self.assertRaises(InvalidTransition):
+            self.inbox.renew(old["id"], old["lease_token"], lease_seconds=100)
+        self.assertEqual(self.inbox.get(old["id"])["lease_until"], 1030)
+        self.assertEqual(self.inbox.get(old["id"])["lease_token"], current["lease_token"])
+
+    def test_renew_checks_configuration_and_missing_jobs(self):
+        self.put()
+        claim = self.inbox.claim("worker")
+        for duration in [0, True, 3601, 10 ** 1000, float("inf"), float("nan"), "30"]:
+            with self.subTest(duration=duration), self.assertRaises(ValidationError):
+                self.inbox.renew(claim["id"], claim["lease_token"], lease_seconds=duration)
+        for job_id in [0, True, 2 ** 100, "1"]:
+            with self.subTest(job_id=job_id), self.assertRaises(ValidationError):
+                self.inbox.renew(job_id, claim["lease_token"])
+        with self.assertRaises(KeyError):
+            self.inbox.renew(999, claim["lease_token"])
+        self.assertEqual(self.inbox.get(claim["id"])["lease_until"], 1030)
+
+    def test_renew_samples_time_after_write_lock(self):
+        self.put()
+        claim = self.inbox.claim("worker", lease_seconds=30)
+        renewed = self.after_writer_wait(
+            lambda: self.inbox.renew(claim["id"], claim["lease_token"], lease_seconds=40), 1011)
+        self.assertEqual(renewed["lease_until"], 1051)
+        self.assertEqual(renewed["updated_at"], 1011)
+
+    def test_waiting_renew_cannot_revive_expired_lease(self):
+        self.put()
+        claim = self.inbox.claim("worker", lease_seconds=10)
+        with self.assertRaises(InvalidTransition):
+            self.after_writer_wait(
+                lambda: self.inbox.renew(claim["id"], claim["lease_token"]), 1010)
+        self.assertEqual(self.inbox.get(claim["id"])["lease_until"], 1010)
+
+    def test_concurrent_renew_and_completion_cannot_resurrect_job(self):
+        for completion in ["ack", "fail"]:
+            with self.subTest(completion=completion):
+                self.put(delivery=completion)
+                claim = self.inbox.claim("worker")
+                barrier = threading.Barrier(2)
+                def renew():
+                    barrier.wait(timeout=5)
+                    try:
+                        self.inbox.renew(claim["id"], claim["lease_token"], lease_seconds=60)
+                    except InvalidTransition:
+                        return "completed-first"
+                    return "renewed-first"
+                def complete():
+                    barrier.wait(timeout=5)
+                    if completion == "ack":
+                        self.inbox.ack(claim["id"], claim["lease_token"])
+                    else:
+                        self.inbox.fail(claim["id"], claim["lease_token"], "synthetic failure")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    renewal = pool.submit(renew)
+                    finished = pool.submit(complete)
+                    self.assertIn(renewal.result(timeout=5), ["completed-first", "renewed-first"])
+                    finished.result(timeout=5)
+                state = self.inbox.get(claim["id"])
+                self.assertEqual(state["state"], "succeeded" if completion == "ack" else "queued")
+                self.assertIsNone(state["lease_token"])
+                self.assertIsNone(state["lease_until"])

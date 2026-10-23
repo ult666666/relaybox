@@ -12,6 +12,7 @@ from .auth import sign
 from .demo import seed_demo
 from .server import make_server
 from .store import Conflict, Inbox, InvalidTransition, ValidationError, parse_payload, validate_delivery_id
+from .worker import ReceiptHandler, run_worker
 
 DEMO_SECRET = b"relaybox-synthetic-demo-secret-only"
 
@@ -44,13 +45,20 @@ def parser():
     claim = commands.add_parser("claim", help="claim one ready delivery; output includes the private fencing token")
     claim.add_argument("--worker", required=True)
     claim.add_argument("--lease-seconds", type=float, default=30)
-    for name in ["ack", "fail", "replay"]:
-        command = commands.add_parser(name, help={"ack": "acknowledge a current lease", "fail": "fail a current lease with bounded retry", "replay": "explicitly reset a dead letter's attempt budget"}[name])
+    for name in ["ack", "fail", "replay", "renew"]:
+        command = commands.add_parser(name, help={"ack": "acknowledge a current lease", "fail": "fail a current lease with bounded retry", "replay": "explicitly reset a dead letter's attempt budget", "renew": "extend a current unexpired lease"}[name])
         command.add_argument("job_id", type=int)
         if name != "replay":
             command.add_argument("--token", required=True)
         if name == "fail":
             command.add_argument("--error", required=True)
+        if name == "renew":
+            command.add_argument("--lease-seconds", type=float, default=30)
+    work = commands.add_parser("work", help="process bounded ready work into local synthetic JSON receipts")
+    work.add_argument("--receipts", type=Path, required=True)
+    work.add_argument("--worker", default="local-worker")
+    work.add_argument("--max-jobs", type=int, default=1)
+    work.add_argument("--lease-seconds", type=float, default=30)
     serve = commands.add_parser("serve", help="serve dashboard and webhook endpoint on IPv4 loopback")
     serve.add_argument("--port", type=int, default=8787)
     serve.add_argument("--demo-secret", action="store_true", help="use the public synthetic demo key; no real data")
@@ -95,6 +103,15 @@ def main(argv=None) -> int:
             _print({"job": job})
         elif args.command == "claim":
             _print({"job": inbox.claim(args.worker, lease_seconds=args.lease_seconds)})
+        elif args.command == "renew":
+            job = inbox.renew(args.job_id, args.token, lease_seconds=args.lease_seconds)
+            job.pop("lease_token", None)
+            _print({"job": job})
+        elif args.command == "work":
+            counts = run_worker(inbox, ReceiptHandler(args.receipts), worker=args.worker,
+                                max_jobs=args.max_jobs, lease_seconds=args.lease_seconds)
+            _print(counts)
+            return 1 if counts["failed"] or counts["lost_leases"] else 0
         elif args.command == "ack":
             inbox.ack(args.job_id, args.token)
             _print({"ok": True})

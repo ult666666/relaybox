@@ -83,3 +83,83 @@ class CLITests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertNotIn("Traceback", result.stderr)
             self.assertIn("error", json.loads(result.stderr))
+
+    def test_renew_command_extends_lease_and_omits_token(self):
+        self.run_cli("demo")
+        job = json.loads(self.run_cli("claim", "--worker", "renew-test").stdout)["job"]
+        result = self.run_cli("renew", str(job["id"]), "--token", job["lease_token"], "--lease-seconds", "60")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        renewed = json.loads(result.stdout)["job"]
+        self.assertGreater(renewed["lease_until"], job["lease_until"])
+        self.assertNotIn("lease_token", renewed)
+        self.assertNotIn(job["lease_token"], result.stdout)
+        for args in [("--token", "wrong"), ("--token", job["lease_token"], "--lease-seconds", "0")]:
+            self.assertEqual(self.run_cli("renew", str(job["id"]), *args).returncode, 2)
+        self.assertEqual(self.run_cli("renew", "999", "--token", "wrong").returncode, 2)
+
+    def test_work_command_processes_receipt_and_returns_summary_without_token(self):
+        from relaybox.store import Inbox
+        inbox = Inbox(self.db)
+        job, _ = inbox.ingest("cli-receipt", b'{"synthetic":true}')
+        receipts = Path(self.tmp.name).resolve() / "receipts"
+        result = self.run_cli("work", "--receipts", str(receipts), "--worker", "cli-worker", "--max-jobs", "10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"claimed": 1, "succeeded": 1, "failed": 0, "lost_leases": 0})
+        self.assertEqual(inbox.get(job["id"])["state"], "succeeded")
+        self.assertNotIn("lease_token", result.stdout)
+        self.assertEqual(len(list(receipts.iterdir())), 1)
+        empty = self.run_cli("work", "--receipts", str(receipts))
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertEqual(json.loads(empty.stdout)["claimed"], 0)
+
+    def test_work_receipt_conflict_exits_one_and_preserves_existing_file(self):
+        from relaybox.store import Inbox
+        from relaybox.worker import ReceiptHandler
+        inbox = Inbox(self.db, clock=lambda: 1000)
+        job, _ = inbox.ingest("cli-conflict", b'{"synthetic":true}')
+        receipts = Path(self.tmp.name).resolve() / "receipts"
+        ReceiptHandler(receipts)(inbox.claim("expired-worker"))
+        receipt = next(receipts.iterdir())
+        receipt.write_bytes(b"unexpected existing file")
+        result = self.run_cli("work", "--receipts", str(receipts))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"claimed": 1, "succeeded": 0, "failed": 1, "lost_leases": 0})
+        self.assertEqual(receipt.read_bytes(), b"unexpected existing file")
+        self.assertEqual(inbox.get(job["id"])["state"], "queued")
+
+    def test_work_lost_lease_exits_one_from_real_cli_with_deterministic_clock(self):
+        from relaybox.store import Inbox
+        inbox = Inbox(self.db, clock=lambda: 1000)
+        job, _ = inbox.ingest("cli-lost-lease", b'{"synthetic":true}')
+        receipts = Path(self.tmp.name) / "receipts"
+        # Inject only clock samples, retaining the real CLI, files and SQLite
+        # transitions. No scheduler delays or timing-dependent short leases.
+        script = """import sys
+from unittest.mock import patch
+from relaybox.store import Inbox
+from relaybox.cli import main
+clock = iter([1000, 1030]).__next__
+with patch('relaybox.cli.Inbox', lambda path: Inbox(path, clock=clock)):
+    code = main()
+sys.exit(code)
+"""
+        result = subprocess.run([sys.executable, "-c", script, "--db", str(self.db),
+                                 "work", "--receipts", str(receipts)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"claimed": 1, "succeeded": 0, "failed": 0, "lost_leases": 1})
+        self.assertEqual(inbox.get(job["id"])["state"], "leased")
+        self.assertEqual(len(list(receipts.iterdir())), 1)
+        self.assertNotIn(inbox.get(job["id"])["lease_token"], result.stdout)
+
+    def test_work_invalid_configuration_exits_two_without_claiming(self):
+        from relaybox.store import Inbox
+        inbox = Inbox(self.db)
+        job, _ = inbox.ingest("invalid-config", b'{}')
+        for args in [("--max-jobs", "0"), ("--max-jobs", "1001"), ("--lease-seconds", "nan"), ("--worker", "")]:
+            with self.subTest(args=args):
+                result = self.run_cli("work", "--receipts", str(Path(self.tmp.name).resolve() / "receipts"), *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(inbox.get(job["id"])["attempts"], 0)
