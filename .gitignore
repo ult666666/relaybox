@@ -12,3 +12,4 @@ work/
 .env.*
 .DS_Store
 .superpowers/
+browser/node_modules/
