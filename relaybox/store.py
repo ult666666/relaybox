@@ -153,9 +153,9 @@ class Inbox:
         validate_delivery_id(delivery_id)
         parse_payload(body)
         digest = hashlib.sha256(body).hexdigest()
-        now = self.clock()
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
             existing = conn.execute("SELECT * FROM jobs WHERE delivery_id=?", (delivery_id,)).fetchone()
             if existing is not None:
                 if existing["digest"] != digest:
@@ -202,9 +202,9 @@ class Inbox:
         except UnicodeError as exc:
             raise ValidationError("invalid worker text") from exc
         _number(lease_seconds, 0.001, 3600, "lease_seconds")
-        now = self.clock()
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
             conn.execute("""UPDATE jobs SET state='dead_letter',last_error='lease expired at attempt limit',
                 lease_until=NULL,lease_token=NULL,worker=NULL,updated_at=?
                 WHERE state='leased' AND lease_until<=? AND attempts>=max_attempts""", (now, now))
@@ -224,9 +224,9 @@ class Inbox:
 
     def _complete(self, job_id: int, token: str, error: str | None):
         _job_id(job_id)
-        now = self.clock()
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
@@ -255,9 +255,9 @@ class Inbox:
 
     def replay(self, job_id: int) -> dict:
         _job_id(job_id)
-        now = self.clock()
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = self.clock()
             row = conn.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)

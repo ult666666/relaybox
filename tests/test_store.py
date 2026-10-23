@@ -1,7 +1,10 @@
 import concurrent.futures
+import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from relaybox.store import Conflict, Inbox, InvalidTransition, ValidationError
 
@@ -16,6 +19,36 @@ class StoreTests(unittest.TestCase):
 
     def put(self, delivery="evt-1", body=b'{"type":"demo.created"}'):
         return self.inbox.ingest(delivery, body)
+
+    def after_writer_wait(self, action, later):
+        """Hold a real SQLite write lock until the action tries BEGIN IMMEDIATE.
+
+        The connect wrapper only attaches SQLite's trace callback. Connections,
+        transactions, contention and action results all remain real.
+        """
+        begin_attempted = threading.Event()
+        connect = sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            connection.set_trace_callback(
+                lambda sql: begin_attempted.set() if sql == "BEGIN IMMEDIATE" else None)
+            return connection
+
+        blocker = connect(self.path, isolation_level=None)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            with patch("relaybox.store.sqlite3.connect", traced_connect):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(action)
+                    try:
+                        self.assertTrue(begin_attempted.wait(5), "action never attempted its write transaction")
+                        self.now = later
+                    finally:
+                        blocker.commit()
+                    return future.result(timeout=5)
+        finally:
+            blocker.close()
 
     def test_duplicate_is_idempotent_without_second_job(self):
         first, created = self.put()
@@ -196,3 +229,61 @@ class StoreTests(unittest.TestCase):
             self.inbox.ack(job["id"], "incorrect-token")
         self.assertEqual(self.inbox.get(job["id"])["lease_token"], claim["lease_token"])
         self.inbox.ack(job["id"], claim["lease_token"])
+
+    def test_claim_lease_starts_after_waiting_for_write_lock(self):
+        self.put()
+        claim = self.after_writer_wait(
+            lambda: self.inbox.claim("waiting-worker", lease_seconds=10), 1011)
+        self.assertEqual(claim["lease_until"], 1021)
+        self.assertEqual(claim["updated_at"], 1011)
+
+    def test_ack_waiting_for_write_lock_cannot_complete_expired_lease(self):
+        job, _ = self.put()
+        claim = self.inbox.claim("worker", lease_seconds=10)
+        with self.assertRaises(InvalidTransition):
+            self.after_writer_wait(
+                lambda: self.inbox.ack(job["id"], claim["lease_token"]), 1011)
+        self.assertEqual(self.inbox.get(job["id"])["state"], "leased")
+
+    def test_fail_waiting_for_write_lock_cannot_modify_expired_lease(self):
+        job, _ = self.put()
+        claim = self.inbox.claim("worker", lease_seconds=10)
+        with self.assertRaises(InvalidTransition):
+            self.after_writer_wait(
+                lambda: self.inbox.fail(job["id"], claim["lease_token"], "late failure"), 1011)
+        state = self.inbox.get(job["id"])
+        self.assertEqual(state["state"], "leased")
+        self.assertIsNone(state["last_error"])
+
+    def test_failure_backoff_starts_after_waiting_for_write_lock(self):
+        job, _ = self.put()
+        claim = self.inbox.claim("worker", lease_seconds=30)
+        self.after_writer_wait(
+            lambda: self.inbox.fail(job["id"], claim["lease_token"], "synthetic failure"), 1011)
+        state = self.inbox.get(job["id"])
+        self.assertEqual(state["available_at"], 1013)
+        self.assertEqual(state["updated_at"], 1011)
+
+    def test_retry_becomes_claimable_while_waiting_for_write_lock(self):
+        job, _ = self.put()
+        claim = self.inbox.claim("worker")
+        self.inbox.fail(job["id"], claim["lease_token"], "synthetic failure")
+        retried = self.after_writer_wait(lambda: self.inbox.claim("next-worker"), 1003)
+        self.assertIsNotNone(retried)
+        self.assertEqual(retried["attempts"], 2)
+
+    def test_ingest_timestamps_follow_acquired_write_lock(self):
+        job, created = self.after_writer_wait(self.put, 1011)
+        self.assertTrue(created)
+        for key in ["created_at", "updated_at", "available_at"]:
+            self.assertEqual(job[key], 1011)
+
+    def test_replay_timestamps_follow_acquired_write_lock(self):
+        single_attempt = Inbox(self.path, clock=lambda: self.now, max_attempts=1)
+        job, _ = single_attempt.ingest("one-attempt", b'{"synthetic":true}')
+        claim = single_attempt.claim("worker")
+        single_attempt.fail(job["id"], claim["lease_token"], "synthetic failure")
+        replayed = self.after_writer_wait(lambda: self.inbox.replay(job["id"]), 1011)
+        self.assertEqual(replayed["created_at"], 1000)
+        self.assertEqual(replayed["updated_at"], 1011)
+        self.assertEqual(replayed["available_at"], 1011)

@@ -4,13 +4,13 @@ Verified locally on macOS arm64 on 23 October 2026. All records and requests use
 
 ## Automated suite
 
-The final suite contains **52 tests**: 6 authentication checks, 21 storage/state-machine checks, 17 live HTTP boundary checks, and 8 CLI subprocess checks. Tests use actual SQLite files and independent connections; HTTP tests bind an ephemeral loopback port and send real HTTP/TCP requests.
+The final suite contains **59 tests**: 6 authentication checks, 28 storage/state-machine checks, 17 live HTTP boundary checks, and 8 CLI subprocess checks. Tests use actual SQLite files and independent connections; HTTP tests bind an ephemeral loopback port and send real HTTP/TCP requests.
 
 | Interpreter | Exact command | Observed result |
 |---|---|---|
-| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 52 passed, 1.859 seconds |
-| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 52 passed, 2.145 seconds |
-| CPython 3.15.0 | `python3 -m unittest discover -v` | 52 passed, 2.169 seconds |
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 59 passed, 1.705 seconds |
+| CPython 3.13.7 | `python3.13 -m unittest discover -v` | 59 passed, 2.048 seconds |
+| CPython 3.15.0 | `python3 -m unittest discover -v` | 59 passed, 2.084 seconds |
 
 The repository-local Python 3.11 interpreter was downloaded solely for compatibility verification and is ignored by Git. It is not needed to run the project on another machine with Python 3.11+ already installed. Timing is local test duration, not a service benchmark.
 
@@ -23,6 +23,20 @@ HTTP tests also cover duplicate headers, missing/negative/ambiguous lengths, uns
 Authentication/storage tests were written before their modules and initially failed because the modules were absent. HTTP tests were likewise written before the server. CLI tests initially failed on the missing module entry point. After implementation, tests exposed and drove corrections to missing-authentication status handling and the demo's logical timing.
 
 A later negative test reproduced oversized job IDs escaping as a SQLite `OverflowError`; validation now returns a JSON CLI error with exit 2. A real Python 3.11 suite run exposed a randomly minted URL-safe token beginning with `-`, which argparse interpreted as another option in the documented CLI form. A deterministic failing token-contract assertion preceded the fix: tokens now encode 256 random bits as 64 lowercase hex characters. The complete 52-test suite then passed on all three interpreters above. These findings are included rather than omitted from the record.
+
+An independent review then identified stale time sampling before SQLite write-lock acquisition. A claim waiting behind another writer could receive an already expired lease; acknowledgment/failure could accept an expired lease using a pre-wait clock sample. Seven deterministic regression tests were written and all seven failed before the fix. A second real connection holds `BEGIN IMMEDIATE`; SQLite's trace callback signals that the worker is attempting its transaction; an injected clock advances before the blocker releases. No lock sleeps, mocked connection results, or substituted database state are used.
+
+Time sampling was moved inside the acquired transaction for `claim`, `_complete` (ack/fail), `ingest`, and `replay`. The seven tests now pass, covering:
+
+- `test_claim_lease_starts_after_waiting_for_write_lock`
+- `test_ack_waiting_for_write_lock_cannot_complete_expired_lease`
+- `test_fail_waiting_for_write_lock_cannot_modify_expired_lease`
+- `test_failure_backoff_starts_after_waiting_for_write_lock`
+- `test_retry_becomes_claimable_while_waiting_for_write_lock`
+- `test_ingest_timestamps_follow_acquired_write_lock`
+- `test_replay_timestamps_follow_acquired_write_lock`
+
+The full suite was rerun on all three interpreters with the 59/59 results in the table. The package was then rebuilt/reinstalled and `examples/verify_install.py` passed again with the output below. HMAC keys and fencing-token behavior were unchanged by this repair. Lease times still use wall-clock values, so clock jumps remain a documented limitation.
 
 ## Package and installed service
 
@@ -72,4 +86,4 @@ The initial screenshot was visually inspected and saved at [dashboard.png](dashb
 
 ## Review boundaries
 
-An implementation self-review checked transaction/fencing paths, input rejection, token exposure, packaged assets, unsafe DOM insertion, and documentation consistency. A separate parent review is expected before publication. No internet-facing deployment, load/capacity benchmark, disaster recovery drill, independent security audit, external webhook consumer, or real customer workflow was tested. The [architecture](ARCHITECTURE.md), [README limits](../README.md#limits-that-matter), and [security guidance](../SECURITY.md) describe those boundaries.
+An implementation self-review checked transaction/fencing paths, input rejection, token exposure, packaged assets, unsafe DOM insertion, and documentation consistency. An independent review identified the lock-contention timing bug documented above; the fix was verified by deterministic regression tests and the complete suite. Parent publication checks are separate. No internet-facing deployment, load/capacity benchmark, disaster recovery drill, independent security audit, external webhook consumer, or real customer workflow was tested. The [architecture](ARCHITECTURE.md), [README limits](../README.md#limits-that-matter), and [security guidance](../SECURITY.md) describe those boundaries.
