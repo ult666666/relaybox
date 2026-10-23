@@ -9,6 +9,9 @@ flowchart LR
   Auth --> Inbox[SQLite inbox]
   Operator[Trusted local CLI / library] --> Inbox
   Inbox --> Dashboard[Read-only dashboard]
+  Inbox --> Worker[Bounded local worker]
+  Worker --> Receipts[Atomic local JSON receipts]
+  Worker --> Inbox
 ```
 
 ## Delivery identity
@@ -27,6 +30,7 @@ stateDiagram-v2
   leased --> queued: fail before attempt budget ends / backoff
   leased --> dead_letter: failure at attempt limit
   leased --> leased: expired lease reclaimed / new token
+  leased --> leased: renew current unexpired token / extend only
   leased --> dead_letter: expired final attempt on next claim
   dead_letter --> queued: explicit replay / attempts reset
 ```
@@ -35,9 +39,19 @@ Each operation opens a separate SQLite connection with WAL mode, full synchronou
 
 Acknowledgment and failure check **state + token + unexpired lease** in a write transaction. A reclaimed job gets a fresh token. Old workers are rejected even if they finish after the new claim; an expired worker is also rejected before any reclaim. Fencing only protects this database. Processing remains at least once, and any consumer side effect must be idempotent or independently fenced.
 
+Renewal applies the same state/token/expiry checks under `BEGIN IMMEDIATE`, sampling time only after lock acquisition. It sets expiry to `max(existing expiry, now + requested duration)` without changing worker, token, or attempts. Completion and renewal serialize; a completed job cannot be revived. Exact expiry fails renewal. Workers needing more time must arrange explicit renewal before expiry; no background thread renews on their behalf.
+
 Retries use `min(max_delay, base_delay × 2^(attempts−1))`, defaulting to 2, 4, … seconds with a 60-second cap. Attempts count claims, including expired leases. At the default budget of three claims, the final failure or next poll after a final expired lease yields `dead_letter`. Policy values are stored per job, so opening a database with a differently configured `Inbox` does not change old deliveries. An explicit replay resets attempts and records `replay_count`; it may be requested repeatedly by the trusted local operator.
 
 No scheduler runs in the background. `available_at` gates future claims; another call to `claim` is required to take work or reconcile expired final leases. Dashboard counts reflect persisted state, not speculative timer transitions.
+
+## Bounded local processing
+
+`run_worker` validates configuration, then processes up to 1–1000 claims through a caller-supplied handler. It stops immediately at no ready work, including when retries are delayed. Handler return attempts ack; a normal exception attempts fail under the stored policy. A rejected ack/fail increments `lost_leases` instead of changing another owner's job. Other inbox storage/I/O failures propagate. KeyboardInterrupt/SystemExit leave the current lease to expire. The bound controls claims, not handler execution time; external side effects and long-handler renewal remain caller responsibilities.
+
+The CLI uses only `ReceiptHandler`; it cannot load arbitrary handlers or execute shell commands. A receipt's hashed filename combines delivery identity and raw body digest, independent of database-local job IDs. Canonical versioned JSON includes only delivery ID, digest and parsed synthetic payload. Repeating the same effect after an expired claim or from another database succeeds only if its exact bytes already exist. Any other contents fail without overwrite. A fully written/fsynced temporary file is hard-linked to its final name atomically, then removed. This supports concurrent identical publications while preventing partial final files. Details are in the [receipt contract](API.md#local-worker-library-and-receipt-format).
+
+The local receipt directory and parents must be trusted against concurrent replacement. Ancestor aliases are canonicalized, the selected directory itself cannot be a symlink, and existing nonregular/symlink receipts are rejected. New directories/files request private POSIX permissions; existing permissions are not altered. Hard-link support is required. The filesystem effect and SQLite acknowledgment have no shared transaction. A process crash after publication may repeat the handler, which accepts the identical retained receipt. A hard kill can leave temporary files; directory metadata is not fsynced and power-loss durability is unverified. Deleting/editing receipts defeats this demonstration idempotency; it is not a distributed exactly-once protocol.
 
 ## HTTP and browser boundary
 
@@ -45,10 +59,10 @@ The server binds only to `127.0.0.1`; arbitrary external binding is refused. Hos
 
 Requests are closed after one response. Bodies require a single canonical `Content-Length`, are bounded at 65,536 bytes, and have a three-second socket read timeout. Compressed bodies, chunked framing, duplicate important headers and unsupported methods are rejected. The server caps active handlers at 32. These are per-read socket limits, not an absolute end-to-end deadline, and are not a substitute for an internet-facing HTTP server. SQLite contention and disk errors return `503` without database details.
 
-The HTTP API does not expose lease tokens. Claim/ack/fail/replay require trusted filesystem access through CLI/library calls. The dashboard uses DOM `textContent`, displays untrusted payloads as text, includes labeled filters and semantic tables, supports keyboard interaction and narrow screens, and sends a restrictive Content Security Policy. No CDN, external font, telemetry or browser runtime dependency is used.
+The HTTP API does not expose lease tokens. Claim/renew/ack/fail/replay and the local worker require trusted filesystem access through CLI/library calls. The dashboard uses DOM `textContent`, displays untrusted payloads as text, includes labeled filters and semantic tables, supports keyboard interaction and narrow screens, and sends a restrictive Content Security Policy. No CDN, external font, telemetry or browser runtime dependency is used.
 
 ## Deliberate tradeoffs
 
-SQLite keeps the state machine inspectable and portable, at the cost of serial writes and a single local file. Wall-clock leases are easy to inspect but assume a stable local clock; clock jumps can shorten or extend ownership. A single random token is sufficient for database fencing, but is not an ordered counter for external resources. There is no retention, automated migration, lease extension, dead-letter audit trail, remote worker API, outbound delivery, exactly-once guarantee or scale claim.
+SQLite keeps the state machine inspectable and portable, at the cost of serial writes and a single local file. Wall-clock leases are easy to inspect but assume a stable local clock; clock jumps can shorten or extend ownership. A single random token is sufficient for database fencing, but is not an ordered counter for external resources. There is no retention, automated migration, automatic lease renewal, dead-letter audit trail, remote worker API, outbound delivery, exactly-once guarantee or scale claim.
 
 Tests exercise real files and connections, live HTTP sockets, command subprocesses, and a synthetic demo. Browser interaction verification is documented separately in [VERIFICATION.md](VERIFICATION.md). AI assistance was used for implementation and testing; the evidence does not represent an independent security audit.

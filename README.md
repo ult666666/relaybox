@@ -54,6 +54,18 @@ Send those headers and the **unchanged file bytes** to `POST /webhooks` within f
 
 ## Work and recover
 
+Process ready synthetic deliveries into local JSON receipts:
+
+```bash
+python3 -m relaybox --db .local/demo.sqlite3 work --receipts .local/receipts --max-jobs 10
+```
+
+This bounded worker claims at most 10 jobs and stops as soon as none is ready. It does not wait for future retries. Each successful receipt is acknowledged; ordinary handler failures schedule the existing retry/dead-letter policy. Output is a token-free summary such as `{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0}`. The default limit is one claim; `--max-jobs` accepts integers 1–1000. `--worker` defaults to `local-worker`; `--lease-seconds` defaults to 30.
+
+Receipts contain version 1, delivery ID, original body SHA-256 digest, and parsed synthetic payload. The filename hashes the delivery ID together with the body digest, so database-local job numbers and path-like IDs cannot collide or escape the directory. An existing byte-identical receipt succeeds without rewriting it; a conflicting, corrupt, noncanonical, symlink, or nonregular receipt fails without overwriting it. Publication uses a fully written temporary file and an exclusive atomic hard link. Use a trusted local directory on a filesystem supporting hard links; the selected directory and its parents must not be concurrently replaced by another actor. Trusted ancestor aliases (such as macOS `/var`) are canonicalized; the selected directory itself must not be a symlink. New directories use mode `0700` and files `0600`, subject to umask; existing permissions are unchanged. This demonstrates local idempotency, with no distributed exactly-once or power-loss guarantee. Full [receipt format and limits](docs/API.md#local-worker-library-and-receipt-format).
+
+For manual ownership and recovery:
+
 ```bash
 python3 -m relaybox --db .local/demo.sqlite3 list --state dead_letter
 python3 -m relaybox --db .local/demo.sqlite3 replay 3
@@ -63,27 +75,37 @@ python3 -m relaybox --db .local/demo.sqlite3 claim --worker local-reviewer --lea
 The claim response includes a private `lease_token`. Complete the claimed ID with that token before expiry:
 
 ```bash
+# Extend a still-current lease before expiry (same token, no new attempt):
+python3 -m relaybox --db .local/demo.sqlite3 renew JOB_ID --token TOKEN --lease-seconds 60
 python3 -m relaybox --db .local/demo.sqlite3 ack JOB_ID --token TOKEN
 # Or record a failure; this schedules a retry or ends in dead_letter:
 python3 -m relaybox --db .local/demo.sqlite3 fail JOB_ID --token TOKEN --error "Synthetic local failure"
 ```
 
-Commands return JSON; successful commands exit `0`, invalid arguments or failed operations exit `2`. An empty claim is successful and returns `{"job": null}`. Replay is deliberately explicit and only accepts dead letters. Each replay resets the attempt budget; a local operator can request further replays. Worker operations stay in the CLI/library, so the dashboard cannot mutate jobs.
+Commands return JSON; successful commands exit `0`, invalid arguments or failed operations exit `2`. `work` exits `1` if any handler failure was recorded or ownership was lost before completion. An empty claim is successful and returns `{"job": null}`. Replay is deliberately explicit and only accepts dead letters. Each replay resets the attempt budget; a local operator can request further replays. Worker operations stay in the CLI/library, so the dashboard cannot mutate jobs.
 
 ## Library API
 
 ```python
 from relaybox.store import Inbox
+from relaybox.worker import ReceiptHandler, run_worker
 
 inbox = Inbox("inbox.sqlite3", max_attempts=3, base_delay=2, max_delay=60)
 job, created = inbox.ingest("example-001", b'{"synthetic":true}')
-claim = inbox.claim("example-worker", lease_seconds=30)
-if claim:
-    # Process locally. This demo intentionally has no outbound delivery worker.
-    inbox.ack(claim["id"], claim["lease_token"])
+summary = run_worker(inbox, ReceiptHandler("receipts"), max_jobs=10)
+print(summary)
+
+# Or pass your own local idempotent handler:
+inbox.ingest("example-002", b'{"synthetic":true}')
+def handle(job):
+    print(job["payload"]["synthetic"])
+    # Before a long phase, while ownership is still valid:
+    inbox.renew(job["id"], job["lease_token"], lease_seconds=60)
+
+run_worker(inbox, handle, worker="example-worker", lease_seconds=30)
 ```
 
-`ingest` validates content but does not authenticate a sender; HMAC verification happens at the HTTP boundary. Direct library and CLI access is trusted local operator access.
+`ingest` validates content but does not authenticate a sender; HMAC verification happens at the HTTP boundary. Direct library and CLI access is trusted local operator access. Handlers receive the claimed job, including the private token, and return normally to acknowledge or raise an `Exception` to fail. Long handlers must arrange explicit renewal before expiry or stay below the lease duration: there is no automatic renewal thread or handler timeout. External effects still require the caller's own idempotency. KeyboardInterrupt/SystemExit propagate and leave the lease for expiry recovery; inbox storage/I/O errors also propagate.
 
 ## Inspect the engineering
 
@@ -93,13 +115,13 @@ Start with [`store.py`](relaybox/store.py) for atomic `BEGIN IMMEDIATE` claims a
 python3 -m unittest discover -v
 ```
 
-CI runs the complete suite, installs the package, executes the installed CLI outside the checkout, and requests assets from the installed server on Python 3.11 and 3.13. Read [verification evidence](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
+CI runs the complete suite, installs the package, executes the installed CLI outside the checkout, requests assets from the installed server, and verifies signed ingestion → receipt processing → acknowledgment on Python 3.11 and 3.13. After installation, run `python examples/verify_install.py` and `python examples/verify_worker.py` with that environment's interpreter. Read [verification evidence](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
 
 ## Limits that matter
 
 - **Local only:** IPv4 loopback, plain HTTP, one shared HMAC key; no account authentication, key rotation, multi-tenant permissions, or TLS deployment configuration. Any process/user with local HTTP access can read payloads.
 - **At least once:** a lease can expire during work. Tokens fence acknowledgments in this SQLite database; they cannot undo or prevent external side effects. Consumers need their own idempotency strategy.
-- **Small scope:** 64 KiB JSON objects, 32 active HTTP handlers, three-second socket read timeout, 10-second SQLite busy timeout. No outbound delivery, rate quotas, background scheduler, lease renewal, or distributed workers.
+- **Small scope:** 64 KiB JSON objects, 32 active HTTP handlers, three-second socket read timeout, 10-second SQLite busy timeout. The local worker bounds claims, not handler runtime. No outbound delivery, rate quotas, background scheduler, automatic lease renewal, or distributed worker coordination.
 - **Recovery requires activity:** expiry is reconciled on the next claim. The dashboard reports persisted state and may show an expired lease until a worker polls.
 - **Storage is bounded only by your disk:** no retention, encryption at rest, automatic backups, migrations beyond schema version 1, payload search, or full audit history. The dashboard shows the latest 100 matches; the API allows up to 500.
 - **Demonstration evidence:** synthetic records and deterministic logical state transitions, with measured local checks. No customer usage, production reliability, benchmark, or independent security audit claims.
