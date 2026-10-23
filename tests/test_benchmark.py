@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 from unittest.mock import patch
 
 from relaybox.store import Inbox
@@ -97,7 +97,7 @@ class BenchmarkTests(unittest.TestCase):
             def mutate_once():
                 if first[0]:
                     first[0] = False
-                    with sqlite3.connect(inbox.path) as connection:
+                    with closing(sqlite3.connect(inbox.path)) as connection, connection:
                         connection.execute("UPDATE jobs SET body=? WHERE id=1", (b"{}",))
                 return original()
             inbox.metrics = mutate_once
@@ -108,14 +108,14 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             inbox = self.tool.seed(Inbox, Path(directory) / "synthetic.sqlite3", 10)
             before = self.tool.database_digest(inbox.path)
-            with sqlite3.connect(inbox.path) as connection:
+            with closing(sqlite3.connect(inbox.path)) as connection, connection:
                 connection.execute("PRAGMA user_version=9")
             self.assertNotEqual(self.tool.database_digest(inbox.path), before)
-            with sqlite3.connect(inbox.path) as connection:
+            with closing(sqlite3.connect(inbox.path)) as connection, connection:
                 connection.execute("PRAGMA user_version=1")
             original = inbox.metrics
             def mutate_version():
-                with sqlite3.connect(inbox.path) as connection:
+                with closing(sqlite3.connect(inbox.path)) as connection, connection:
                     connection.execute("PRAGMA user_version=9")
                 return original()
             inbox.metrics = mutate_version
