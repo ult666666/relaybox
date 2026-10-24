@@ -43,6 +43,8 @@ Call this on an existing `Inbox`. Construction is unchanged: `Inbox(path)` initi
 
 The dashboard takes its four cards and operations summary from metrics, and obtains the latest-100 list separately. It labels those separate scopes/instants, shows local browser times and descriptive unavailable markers, and refreshes only on user action. Each section renders as soon as its own request succeeds; a failed section clears its values and displays failure text without hiding successful data in the other section. Counts/times clear while a new snapshot loads, so old values cannot silently look current. Refresh remains focusable while busy, preserving keyboard focus and allowing an explicit retry; generation checks ignore older refresh and detail responses. There is no public hosted backend or automatic telemetry collector.
 
+Since 0.4.1 the dashboard rounds `oldest_queued_ready_wait_seconds` for display only; the HTTP and library value remains exact seconds. Null keeps `— No ready queued jobs`; exactly 0 shows `0 seconds since ready`; values below 0.1 show `Less than 0.1 seconds since ready`. Other values use seconds below 60, minutes below 3600, hours below 86400 and days beyond, with at most one decimal place, the browser's number formatting, singular/plural units and an `About` prefix, for example `About 4.6 seconds since ready` for 4.625 or `About 2 days since ready` for 172800. The unit is chosen before rounding, so 59.99 shows `About 60 seconds`. A wait that is not null or a finite nonnegative number clears the metrics section through its usual error state instead of showing an invented time.
+
 ## Signed ingestion
 
 Required headers:

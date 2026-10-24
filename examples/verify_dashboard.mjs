@@ -42,7 +42,7 @@ try {
   assert.equal(await text("queued"), "4");
   assert.equal(await text("leased"), "3");
   for (const [id, expected] of Object.entries({"queued-ready": "2", "queued-delayed": "2", "leases-active": "1", "leases-reclaimable": "1", "leases-exhausted": "1"})) assert.equal(await text(id), expected);
-  assert.match(await text("oldest-ready"), /^100 seconds since ready$/);
+  assert.equal(await text("oldest-ready"), "About 1.7 minutes since ready"); // Exact API value: 100 seconds.
   assert.match(await text("next-retry"), /12:17:20 AM/);
   assert.match(await text("next-expiry"), /12:16:50 AM/);
   assert.match(await page.locator("#operations").innerText(), /next worker claim/i);
@@ -60,7 +60,7 @@ try {
   assert.equal(await text("leases-active"), "0");
   assert.equal(await text("leases-reclaimable"), "2");
   assert.equal(await text("leased"), "3"); // diagnostics never reconcile rows
-  assert.match(await text("oldest-ready"), /^200 seconds since ready$/);
+  assert.equal(await text("oldest-ready"), "About 3.3 minutes since ready"); // Exact API value: 200 seconds.
   assert.equal(await text("next-retry"), "— No delayed queued jobs");
   assert.equal(await text("next-expiry"), "— No active leases");
   await control({empty: true});
@@ -110,7 +110,7 @@ try {
   await fulfilled.promise;
   await page.waitForLoadState("networkidle");
   assert.equal(await text("queued-ready"), "4");
-  assert.match(await text("oldest-ready"), /^200 seconds since ready$/);
+  assert.equal(await text("oldest-ready"), "About 3.3 minutes since ready");
   assert.equal(await page.locator("#rows tr").count(), 4);
   await page.unroute("**/api/metrics");
 

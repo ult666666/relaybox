@@ -1,0 +1,8 @@
+{
+  "name": "relaybox-browser-check",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {"node": "24.x"},
+  "scripts": {"test": "node verify.mjs"},
+  "devDependencies": {"playwright": "1.61.1"}
+}

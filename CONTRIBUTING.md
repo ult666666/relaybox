@@ -8,13 +8,16 @@ Use Python 3.11 or newer. The runtime and Python unittest suite need no third-pa
 4. In a fresh virtual environment, run `python -m pip install .` and `python examples/verify_install.py` to check packaged assets and the CLI outside the checkout.
 5. Update the API/architecture docs when a contract changes. For dashboard changes, check keyboard interaction, empty/error states, hostile text, and a narrow viewport.
 
-Optional dashboard verification uses separately installed development tools, with no repository npm setup or runtime dependency:
+For dashboard changes, also run the installed-wheel Chromium check in [`browser/`](browser/README.md) with Node 24, passing the fresh environment's interpreter:
 
 ```bash
-node examples/verify_dashboard.mjs /absolute/path/to/playwright python3.13
+cd browser
+npm ci --ignore-scripts
+npx playwright install chromium
+npm test -- /absolute/path/to/fresh/environment/bin/python
 ```
 
-The script requires Playwright 1.61.1 with its Chromium browser already installed. It starts only a local test server, drives a logical-clock fixture, and checks independent refresh failures, stale response ordering, hostile text, keyboard and mobile behavior. Screenshots are saved under ignored `.local/`. This optional browser check is not part of `unittest` or a claimed hosted CI result. Standard CI runs the Python suites and installed HTTP/asset/worker/recovery checks.
+Playwright 1.61.1 is locked there as a development dependency; it never enters the Python runtime. The check fails when Chromium is missing. It covers installed HTTP/assets, the readable wait display, independent refresh failures, late responses, hostile text, keyboard and narrow layouts, and saves synthetic screenshots plus a receipt under ignored `.local/browser/`. The older source-checkout script, `node examples/verify_dashboard.mjs /absolute/path/to/playwright python3.13`, still works for a quick check before packaging. CI runs the Python suites with installed HTTP/asset/worker/recovery checks, and a separate job runs the browser check against the built wheel.
 
 Use synthetic data only. Do not commit local databases, screenshots containing secrets, generated package directories, or credentials. Respect the local-only boundary; internet-facing deployment or outbound delivery would require a separate threat model and design.
 
