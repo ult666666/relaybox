@@ -2,6 +2,58 @@
 
 Verified locally on macOS arm64 on 23 October 2026. All records and requests used synthetic data. This record distinguishes observed behavior from unverified deployment or reliability claims.
 
+## v0.4.1 readable oldest-ready wait
+
+Started from integrated main `c0a7adeaa323a52a069f3a211da3aca47c041e15`. Installed 0.4.0 captures showed `4.6398069858551025 seconds since ready`, because the dashboard interpolated the exact API float. At runtime only the shipped `relaybox/assets/app.js` and the version string change; API, library, worker, recovery and metrics semantics are unchanged. The RED checkpoint `efe947c` added the browser check in `browser/` before any runtime change.
+
+**RED.** With the released 0.4.0 wheel installed in `.local/queue-final-venv` (CPython 3.13.7), Node 24.18.0, Playwright 1.61.1 and Chromium 149.0.7827.55:
+
+```bash
+cd browser
+npm ci --ignore-scripts
+npm test -- "$PWD/../.local/queue-final-venv/bin/python"
+```
+
+Installed HTTP returned exactly `4.625` seconds at the supplied clock 1792785600.25 (2026-10-23 20:00:00.25 UTC). The page showed `4.625 seconds since ready`, the expected `About 4.6 seconds since ready` assertion failed with exit 1, and the fixture still shut down with exit 0. The 0.4.1 assertion in `examples/verify_install.py` also fails against that 0.4.0 environment.
+
+**Change.** The page rounds the wait for display: seconds below 60, minutes below 3600, hours below 86400, days beyond, at most one decimal place, browser number formatting, singular/plural units and an `About` prefix. Null keeps `— No ready queued jobs`, exactly 0 shows `0 seconds since ready`, and values below 0.1 show `Less than 0.1 seconds since ready`. The unit is chosen before rounding, so 59.99 displays `About 60 seconds since ready`. A wait that is not null or a finite nonnegative number throws into the existing metrics error path, which clears the section (`Snapshot unavailable: invalid oldest ready wait. …`) instead of showing an invented time.
+
+**GREEN.** The release-candidate wheel was built from a clean `git archive` of `148882e`, whose packaged files are identical to this record's commit, and installed into a new environment outside the checkout:
+
+```bash
+git archive 148882e | tar -x -C "$SRC"
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m venv "$ENV"
+"$ENV/bin/python" -m pip wheel --no-deps --no-cache-dir --wheel-dir "$WHEEL" "$SRC"
+"$ENV/bin/python" -m pip install --no-deps --no-index "$WHEEL/relaybox_inbox-0.4.1-py3-none-any.whl"
+cd browser && npm ci --ignore-scripts && npx playwright install chromium && npm test -- "$ENV/bin/python"
+```
+
+The wheel was 33,975 bytes, SHA-256 `5b956e0053928813ba6f39117b1e7496791ec5460a5e1298b3db091f8ff5aca5`. All 12 packaged runtime files are byte-identical in the wheel, installed site-packages and source. METADATA reports 0.4.1 with no dependencies, and the served `app.js` SHA-256 `2c4df6856a546c8cb57841edc280379e1440f660512a410437aaf05228b2b0f7` equals source. The browser check passed (exit 0, about 3 seconds), as did five further consecutive runs; no fixture or Chromium process remained.
+
+Actual installed evidence: exact API value `4.625` displayed as `About 4.6 seconds since ready`; after a supplied-clock advance and manual Refresh, the actual 104.625-second wait displayed as `About 1.7 minutes since ready`; counts, 2026 dates, empty inbox, state filter, plain-text hostile payload, keyboard focus, no page overflow at 1440/1280/390/320 px (the table keeps its own scroller), and a no-JavaScript static shell with no data. The synthetic screenshots were inspected visually.
+
+Controlled probes run in the same browser and are labeled separately in the receipt. Substituted metrics responses checked 20 duration values (null, 0, 0.000001, 0.099999, 0.1, 0.96, 1, 1.04, 1.25, 4.6398…, 59.99, 60, 3599, 3600, 5400, 86399, 86400, 129600, 172800 and 253402300799 → `About 2,932,897 days since ready`), the longest text at 320 px, year-9999 dates, de-DE output (`About 4,6 seconds`, `About 2.932.897 days`), and negative, string, boolean, omitted and nonfinite (`1e999`) waits clearing only the metrics section. Injected 503s left the other section working. Actual responses were held to show that late metrics, list and detail responses cannot replace newer ones.
+
+The checkpoint's late-response probes waited on `networkidle`, which resolves immediately on an already idle page, so they passed only when the browser happened to handle the held response first. They now wait until the page's own JSON read of the held URL settles, using a test-only counter installed for that phase. Mutations applied only to a separate scratch installation's `app.js` each failed: removing the metrics, list or detail generation guard (`'2' !== '4'`, `9 !== 4`, detail showing `ready-old`) and rendering an invalid wait as zero. A missing Chromium (`PLAYWRIGHT_BROWSERS_PATH` set to an empty directory), a nonexistent interpreter, an interpreter without RelayBox, and an injected failure while an actual response was held each exited 1 with a receipt, and every fixture server that started shut down with exit 0. One authoring mistake, an async helper returning a bare promise, hung a run until the 150-second bound; cleanup still closed the browser and fixture.
+
+| Interpreter | Exact command (`RELAYBOX_BENCH_PYTHON="$ENV/bin/python"`) | Observed result |
+|---|---|---|
+| CPython 3.11.15 | `.local/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 -m unittest discover -v` | 147 passed, 0 skipped, 3.808 seconds |
+| CPython 3.13.7 | `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m unittest discover -v` | 147 passed, 0 skipped, 4.482 seconds |
+| CPython 3.15.0 | `/opt/homebrew/bin/python3.15 -m unittest discover -v` | 147 passed, 0 skipped, 4.630 seconds |
+
+The 147 tests are the 135 runtime tests plus 12 measurement-tool tests; both installed-interpreter tests executed against the 0.4.1 environment. No Python test was added because the change is browser rendering, covered above. Logs had no ResourceWarning or DeprecationWarning. The source-checkout `examples/verify_dashboard.mjs`, with its two exact-wait expectations updated, also passed. The installed checks passed with the same environment:
+
+```json
+{"installed_cli": "ok", "demo_states": 4, "dashboard_assets": 3, "ingest_statuses": [202, 200], "source_directory_import": false, "version": "0.4.1", "metrics_http": true, "asset_bytes_equal": true}
+{"installed_worker": "ok", "ingest_statuses": [202, 200], "summary": {"claimed": 1, "succeeded": 1, "failed": 0, "lost_leases": 0}, "receipt_files": 1, "final_state": "succeeded", "outside_checkout": true}
+{"installed_backup": "ok", "version": "0.4.1", "snapshot_jobs": 1, "verified_sha256": true, "rejected_wal_unchanged": true, "all_columns_preserved": true, "duplicate_created": false, "summary": {"claimed": 1, "succeeded": 1, "failed": 0, "lost_leases": 0}, "receipt_reused_without_rewrite": true, "original_state": "leased", "restored_state": "succeeded", "outside_checkout": true}
+```
+
+CI now has a `browser` job: 15-minute limit, workflow-level read-only `contents` permission, checkout without persisted credentials, Node 24, `npm ci --ignore-scripts`, `npx playwright install --with-deps chromium`, the built wheel installed outside the checkout, a mandatory Chromium run, and upload of only the synthetic receipt and four screenshots. It reuses this workflow's checkout v7.0.1 and setup-python v7.0.0 pins. setup-node v6.5.0 and upload-artifact v4.6.2 reuse SHAs already pinned in the owner's other repositories, and both resolve to those official tags. Replaying the job's commands locally on the clean export (macOS, without `--with-deps`) passed and produced the five uploaded files. **The hosted job has not run yet; its result is unverified.**
+
+`store.py`, measurement source, `docs/PERFORMANCE.md`, raw receipts, tracked screenshots and the 0.4.0 release evidence are unchanged; no measurement was rerun for documentation. These are focused Chromium checks, not an accessibility, security, performance or cross-browser audit. Fresh wall-clock demo screenshots, hosted CI, review and release remain separate.
+
 ## v0.4.0 queue readiness and expiry snapshot
 
 Started from clean released main `dcf8cd27d6d1a12945af95ec909c8acee4562e0f`. The 0.4.0 suite contains **135 tests**: 6 authentication, 36 storage/state-machine, 7 queue metrics, 20 HTTP, 16 CLI, 30 worker/receipt and 20 backup/recovery tests. All preceding release evidence is retained below.
