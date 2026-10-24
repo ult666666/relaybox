@@ -8,7 +8,7 @@
 
 **Tech stack:** Python 3.11+ standard library, unchanged SQLite schema 1, plain HTML/CSS/JavaScript; optional dev-only existing Playwright 1.61.1 and Chromium.
 
-**Spec:** `/Users/prince/Documents/Codex/2026-10-23/while/work/brief-queue-observability.md` (parent-owned complete brief).
+**Spec:** the parent-owned complete brief, `brief-queue-observability.md`, kept outside this repository.
 
 ## Global constraints
 

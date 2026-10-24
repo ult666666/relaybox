@@ -90,7 +90,7 @@ The final wheel was 33,288 bytes, SHA-256 `e6f4e4ea2b2bb53073b956c33b95237fa473c
 Optional development browser verification used the existing external Playwright **1.61.1** module and its Chromium; no browser/npm runtime dependency was added:
 
 ```bash
-node examples/verify_dashboard.mjs /Users/prince/Documents/Codex/2026-10-23/while/work/impact-ledger/node_modules/playwright python3.13
+node examples/verify_dashboard.mjs /path/to/node_modules/playwright python3.13
 ```
 
 The script starts a real loopback HTTP server with a private SQLite fixture and logical clock, controlled only over test-process stdin. The initial red run failed on the absent operations summary. Green checks cover mixed exact values, explicit empty/null descriptions, manual refresh after clock-only/state changes, persisted leased counts after expiry, independent failed metrics and failed list responses, stale metrics ordering, stale detail ordering, safe hostile text, keyboard interaction and 390px mobile width. Failures and response delays are deliberately simulated at the browser transport boundary; fixture data/metrics/HTML come from the actual local application. A later self-review assertion found that disabling Refresh dropped keyboard focus; keeping it focusable with an accessible busy indicator fixed that failing browser test. Temporarily removing the metrics generation guard caused the held-old-response check to fail with ready count 2 instead of 4; the guard was restored before final verification.
