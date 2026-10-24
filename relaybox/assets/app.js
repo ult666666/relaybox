@@ -9,17 +9,33 @@ const date = (seconds) => {
   return Number.isNaN(value.getTime()) ? "— Unavailable" : value.toLocaleString();
 };
 const operationIds = ["queued-ready", "queued-delayed", "leases-active", "leases-reclaimable", "leases-exhausted", "oldest-ready", "next-retry", "next-expiry"];
+// The API keeps exact seconds. The display rounds to at most one decimal place
+// in the largest fitting unit, with local number formatting, and says "About".
+const amount = new Intl.NumberFormat(undefined, {maximumFractionDigits: 1});
+const plural = new Intl.PluralRules("en", {maximumFractionDigits: 1});
+
+function readyWait(seconds) {
+  if (seconds === null) return "— No ready queued jobs";
+  // Never invent a wait: the caller's error path clears the whole snapshot.
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) throw new Error("invalid oldest ready wait");
+  if (seconds === 0) return `${amount.format(0)} seconds since ready`;
+  if (seconds < 0.1) return `Less than ${amount.format(0.1)} seconds since ready`;
+  const [size, unit] = seconds < 60 ? [1, "second"] : seconds < 3600 ? [60, "minute"] : seconds < 86400 ? [3600, "hour"] : [86400, "day"];
+  const value = seconds / size;
+  return `About ${amount.format(value)} ${unit}${plural.select(value) === "one" ? "" : "s"} since ready`;
+}
 
 function clearMetrics() {
   for (const key of [...Object.keys(labels), ...operationIds]) byId(key).textContent = "—";
 }
 
 function renderMetrics(metrics) {
+  const wait = readyWait(metrics.oldest_queued_ready_wait_seconds);
   for (const key of Object.keys(labels)) byId(key).textContent = String(metrics.counts[key]);
   for (const [id, key] of Object.entries({"queued-ready": "queued_ready", "queued-delayed": "queued_delayed", "leases-active": "leases_active", "leases-reclaimable": "leases_expired_reclaimable", "leases-exhausted": "leases_expired_exhausted"})) {
     byId(id).textContent = String(metrics[key]);
   }
-  byId("oldest-ready").textContent = metrics.oldest_queued_ready_wait_seconds === null ? "— No ready queued jobs" : `${metrics.oldest_queued_ready_wait_seconds} seconds since ready`;
+  byId("oldest-ready").textContent = wait;
   byId("next-retry").textContent = metrics.next_retry_at === null ? "— No delayed queued jobs" : date(metrics.next_retry_at);
   byId("next-expiry").textContent = metrics.next_lease_expiry === null ? "— No active leases" : date(metrics.next_lease_expiry);
   byId("metrics-status").textContent = `Inbox snapshot at ${date(metrics.snapshot_at)} (local time). Readiness and expiry are measured at this moment.`;
