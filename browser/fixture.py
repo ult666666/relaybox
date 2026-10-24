@@ -7,6 +7,7 @@ from contextlib import closing
 import importlib.metadata
 import json
 from pathlib import Path
+import platform
 import sqlite3
 import sys
 import tempfile
@@ -60,7 +61,7 @@ def main():
             thread.start()
             print(json.dumps({"url": f"http://127.0.0.1:{server.server_port}",
                               "version": relaybox.__version__, "package": str(package),
-                              "clock": baseline}), flush=True)
+                              "python": platform.python_version(), "clock": baseline}), flush=True)
             for line in sys.stdin:
                 command = json.loads(line)
                 if command == {"mixed": True}:
