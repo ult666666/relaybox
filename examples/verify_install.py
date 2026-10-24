@@ -25,7 +25,7 @@ import base64, importlib.metadata, json
 from importlib.resources import files
 from pathlib import Path
 import relaybox
-assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.4.0"
+assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.4.1"
 assert "site-packages" in str(Path(relaybox.__file__).resolve())
 assets = {route: base64.b64encode(files("relaybox").joinpath("assets", name).read_bytes()).decode()
           for route, name in [("/", "index.html"), ("/assets/app.js", "app.js"), ("/assets/style.css", "style.css")]}

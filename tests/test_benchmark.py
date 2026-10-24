@@ -138,7 +138,7 @@ class BenchmarkTests(unittest.TestCase):
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["schema_version"], 1)
         self.assertEqual([r["rows"] for r in receipt["measurements"]], [10, 120])
-        self.assertEqual(receipt["runtime"]["package_version"], "0.4.0")
+        self.assertEqual(receipt["runtime"]["package_version"], "0.4.1")
         self.assertTrue(receipt["synthetic"])
         self.assertIn("local", receipt["notice"])
         for private in [str(Path.home()), directory, "lease_token", "hostname", "PYTHONPATH"]:
