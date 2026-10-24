@@ -8,7 +8,7 @@ RelayBox is a Python 3.11+ engineering demo built with the standard library and 
 
 No runtime dependencies, external services, or outbound webhook delivery. This is an educational portfolio project, not a production service. Implementation and tests were developed with AI assistance; review scope and limitations are explicit below.
 
-![RelayBox local dashboard with synthetic deliveries](docs/dashboard.png)
+![RelayBox 0.4.1 local dashboard with four synthetic deliveries, the whole-inbox operations summary and the oldest ready wait shown as "About 9 seconds since ready"](docs/dashboard.png)
 
 ## Run in a minute
 
