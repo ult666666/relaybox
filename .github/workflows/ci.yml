@@ -38,3 +38,46 @@ jobs:
           python -I "$GITHUB_WORKSPACE/examples/benchmark_metrics.py" --sizes 10 1000 --samples 5 --warmups 1
       - name: CLI entry point
         run: relaybox --help
+
+  browser:
+    name: Installed dashboard in Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+      - name: Build the wheel and install it in an environment outside the checkout
+        run: |
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheel" .
+          python -m venv "$RUNNER_TEMP/relaybox-env"
+          "$RUNNER_TEMP/relaybox-env/bin/python" -m pip install --no-deps --no-index "$RUNNER_TEMP"/wheel/relaybox_inbox-*.whl
+      - name: Install exact locked Playwright and Chromium
+        working-directory: browser
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+      - name: Installed HTTP, assets and dashboard (fails if Chromium is missing)
+        working-directory: browser
+        env:
+          RELAYBOX_BROWSER_OUTPUT: ${{ runner.temp }}/relaybox-browser
+        run: npm test -- "$RUNNER_TEMP/relaybox-env/bin/python"
+      - name: Upload only the synthetic screenshots and receipt
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-dashboard-browser
+          path: |
+            ${{ runner.temp }}/relaybox-browser/receipt.json
+            ${{ runner.temp }}/relaybox-browser/synthetic-1440.png
+            ${{ runner.temp }}/relaybox-browser/synthetic-1280.png
+            ${{ runner.temp }}/relaybox-browser/synthetic-390.png
+            ${{ runner.temp }}/relaybox-browser/synthetic-320.png
+          if-no-files-found: error
+          retention-days: 7
