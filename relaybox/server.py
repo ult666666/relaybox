@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from urllib.parse import parse_qs, urlsplit
 
+from . import __version__
 from .auth import AuthError, verify
 from .store import Conflict, Inbox, MAX_BODY, ValidationError, validate_delivery_id
 
@@ -49,7 +50,7 @@ class _Server(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "RelayBox/0.1"
+    server_version = f"RelayBox/{__version__}"
     sys_version = ""
 
     def setup(self):
