@@ -6,7 +6,7 @@
 
 RelayBox is a Python 3.11+ engineering demo built with the standard library and SQLite. It receives authenticated JSON deliveries, deduplicates by delivery ID **and exact payload digest**, and exposes a small durable job state machine. An accessible dashboard makes queued work, active leases, successful acknowledgments, and dead letters visible.
 
-No runtime dependencies, external services, or outbound webhook delivery. This is an educational portfolio project, not a production service. Implementation and tests were developed with AI assistance; review scope and limitations are explicit below.
+No runtime dependencies, external services or outbound webhook delivery. This is an educational portfolio project built with AI assistance, not a production service; see [Limits that matter](#limits-that-matter).
 
 ![RelayBox 0.4.1 local dashboard with four synthetic deliveries, the whole-inbox operations summary and the oldest ready wait shown as "About 9 seconds since ready"](docs/dashboard.png)
 
@@ -60,9 +60,9 @@ Process ready synthetic deliveries into local JSON receipts:
 python3 -m relaybox --db .local/demo.sqlite3 work --receipts .local/receipts --max-jobs 10
 ```
 
-This bounded worker claims at most 10 jobs and stops as soon as none is ready. It does not wait for future retries. Each successful receipt is acknowledged; ordinary handler failures schedule the existing retry/dead-letter policy. Output is a token-free summary such as `{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0}`. The default limit is one claim; `--max-jobs` accepts integers 1–1000. `--worker` defaults to `local-worker`; `--lease-seconds` defaults to 30.
+The worker claims at most 10 jobs and stops as soon as none is ready; it does not wait for future retries. Each written receipt is acknowledged, and a handler failure follows the retry and dead-letter policy. It prints a summary such as `{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0}`. Defaults: `--max-jobs 1` (up to 1000), `--worker local-worker` and `--lease-seconds 30`.
 
-Receipts contain version 1, delivery ID, original body SHA-256 digest, and parsed synthetic payload. The filename hashes the delivery ID together with the body digest, so database-local job numbers and path-like IDs cannot collide or escape the directory. An existing byte-identical receipt succeeds without rewriting it; a conflicting, corrupt, noncanonical, symlink, or nonregular receipt fails without overwriting it. Publication uses a fully written temporary file and an exclusive atomic hard link. Use a trusted local directory on a filesystem supporting hard links; the selected directory and its parents must not be concurrently replaced by another actor. Trusted ancestor aliases (such as macOS `/var`) are canonicalized; the selected directory itself must not be a symlink. New directories use mode `0700` and files `0600`, subject to umask; existing permissions are unchanged. This demonstrates local idempotency, with no distributed exactly-once or power-loss guarantee. Full [receipt format and limits](docs/API.md#local-worker-library-and-receipt-format).
+Each receipt holds a format version, the delivery ID, the SHA-256 digest of the original body and the parsed payload. Its filename hashes the delivery ID with the body digest, so path-like IDs cannot escape the directory. Running a job again finds the identical receipt and succeeds without rewriting it; a conflicting or corrupt receipt fails instead of being overwritten. This shows local idempotency only, with no distributed exactly-once or power-loss guarantee. See the [receipt format and file-safety rules](docs/API.md#local-worker-library-and-receipt-format).
 
 For manual ownership and recovery:
 
@@ -82,15 +82,18 @@ python3 -m relaybox --db .local/demo.sqlite3 ack JOB_ID --token TOKEN
 python3 -m relaybox --db .local/demo.sqlite3 fail JOB_ID --token TOKEN --error "Synthetic local failure"
 ```
 
-Commands return JSON; successful commands exit `0`, invalid arguments or failed operations exit `2`. `work` exits `1` if any handler failure was recorded or ownership was lost before completion. An empty claim is successful and returns `{"job": null}`. Replay is deliberately explicit and only accepts dead letters. Each replay resets the attempt budget; a local operator can request further replays. Worker operations stay in the CLI/library, so the dashboard cannot mutate jobs.
+- Commands print JSON and exit `0` on success, or `2` for invalid arguments and failed operations. `work` exits `1` if a handler failed or a lease was lost.
+- An empty claim succeeds and returns `{"job": null}`.
+- `replay` only accepts dead letters, and each replay resets the attempt budget.
+- Worker operations stay in the CLI and library, so the dashboard cannot change jobs.
 
 ## Understand an idle worker
 
-Version 0.4.0 adds a read-only operations summary. Use Refresh in the dashboard, or GET `/api/metrics` from the local server, to distinguish queued work that is ready now from delayed retries, and active leases from expired leases. The four state cards still show persisted totals: an expired exhausted lease stays in **Leased** until a worker's next claim moves it to dead letter. Viewing diagnostics never claims or reconciles a job.
+Version 0.4.0 adds a read-only operations summary. Use Refresh in the dashboard, or GET `/api/metrics` from the local server, to tell queued work that is ready now from delayed retries, and active leases from expired ones. The four state cards still show persisted totals: an expired lease with no attempts left stays in **Leased** until a worker's next claim moves it to dead letter. Viewing diagnostics never claims or changes a job.
 
-The summary labels its inbox snapshot separately from the latest 100 matching deliveries. Readiness and expiry use one clock sample and one database statement; the list is a separate request and can reflect a different commit. Oldest ready wait means seconds since `available_at`, not time since ingestion or processing latency. Version 0.4.1 displays it rounded, such as `About 4.6 seconds since ready` or `About 1.7 minutes since ready`, while the API keeps exact seconds; an invalid wait value clears the summary with an error instead of showing an invented time. Missing wait/retry/expiry values are explicit descriptions rather than zero dates. Upcoming times use your browser's local timezone. Refresh is manual. A failed section clears its values and displays an error while the other section remains usable; older responses cannot replace a newer refresh.
+The oldest ready wait is the time since a job became ready (`available_at`), not the time since ingestion. The dashboard rounds it, for example `About 4.6 seconds since ready`, and the API keeps exact seconds. Refresh is manual. If one section fails to load, it shows an error and the other keeps working.
 
-Library users can call `inbox.metrics()` on their existing `Inbox` instance. Normal `Inbox(path)` construction still initializes a missing database and applies the existing WAL setup; `metrics()` itself performs only a SELECT. Clock values must be finite Unix seconds from 0 through 253402300799 (through year 9999); booleans and invalid ranges raise `ValidationError`. This is a local diagnostic snapshot, not a monitor, throughput estimate, completion promise or service-health certificate. Aggregates can scan all rows, though they do not select payloads or private job fields. See the [exact metrics contract](docs/API.md#queue-metrics).
+Library users can call `inbox.metrics()` on an existing `Inbox`. It returns a read-only, local diagnostic snapshot: its query can scan every row, but never selects payloads or private job fields. See the [exact metrics contract](docs/API.md#queue-metrics).
 
 To inspect that scan cost, use the source-only [local measurement tool](docs/PERFORMANCE.md). It checks a fixed synthetic workload against an independent oracle, then retains raw installed-library call timings and environment metadata. No production capacity or timing threshold is implied.
 
@@ -103,7 +106,7 @@ python3 -m relaybox --db .local/demo.sqlite3 backup .local/snapshot.sqlite3 --ti
 python3 -m relaybox verify-backup .local/snapshot.sqlite3
 ```
 
-The JSON receipt reports canonical paths, schema version, integrity, job/state counts, physical SHA-256 and file size. It omits payloads and private lease tokens. The **snapshot itself contains all database data, including tokens and payloads**; protect it like the original. The online backup includes committed WAL data and excludes uncommitted changes. It validates the known schema and completed snapshot before exclusively publishing a private `0600` file. Existing paths, symlinks, and stale SQLite sidecars are refused; no overwrite or `--force` exists.
+`backup` prints a JSON receipt with the paths, schema version, integrity result, job counts, SHA-256 and file size; it never includes payloads or lease tokens. The **snapshot itself contains all data, including tokens and payloads**, so protect it like the original. A backup includes committed WAL data, leaves out uncommitted changes, and refuses to overwrite any existing path.
 
 Before switching to a restored path, **stop the original service and every original worker**. Keep the original stopped during the drill. Restore to a new name; do not initialize that destination first:
 
@@ -113,9 +116,9 @@ python3 -m relaybox --db .local/recovered.sqlite3 stats
 python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipts --max-jobs 10
 ```
 
-Compare restore counts with the saved backup receipt before processing work. Attempts, retry policy, replay count and lease fields survive exactly. Expired leases reconcile on the next claim; an unexpired lease remains leased until it expires. The restored copy is an independent local inbox and cannot fence workers using the original. Work performed after the snapshot may repeat after recovery. Retain the same canonical receipt directory separately: backing up the database does not back up receipts. An identical retained receipt lets the demonstration handler repeat safely after a crash before ack; deleting/editing it removes that evidence. External handlers still need their own idempotency. There is no cross-database exactly-once guarantee.
+Compare the restored counts with the saved backup receipt before processing work. Attempts, retry policy, replay counts and leases survive exactly, and the next claim reclaims or dead-letters any expired lease. Keep the receipt directory as well, because the database backup does not include it, and expect work done after the snapshot to repeat. There is no cross-database exactly-once guarantee.
 
-Only operator-owned RelayBox schema-1 files in trusted local directories are supported; this is not a sandbox for hostile database files. No migration or repair is attempted. Ancestor aliases are canonicalized, while explicitly selected symlinks are rejected. Snapshot operations accept a finite 0.1–60 second deadline (default 10), check SQLite VM/backup progress and hash chunks, and reject databases larger than 1 GiB. The deadline cannot interrupt a blocked operating-system I/O call. Verification requires a quiescent standalone DELETE-journal snapshot without sidecars; use `backup` first for live inboxes. Hard-link support is required, Windows ACLs are unverified, hard kills may leave private temporary files, and directory metadata is not fsynced. See the [complete contract](docs/API.md#backup-and-recovery-contract).
+Backups support trusted, operator-owned RelayBox databases up to 1 GiB, with a deadline of 0.1 to 60 seconds (default 10). `verify-backup` needs a standalone snapshot that nothing is writing to, so run `backup` first for a live inbox. See the [complete contract](docs/API.md#backup-and-recovery-contract) for the file-safety rules and platform limits.
 
 After installing, `python examples/verify_backup.py` performs an isolated synthetic backup → verify → restore → expired-lease receipt drill outside the checkout.
 
@@ -140,7 +143,7 @@ def handle(job):
 run_worker(inbox, handle, worker="example-worker", lease_seconds=30)
 ```
 
-`ingest` validates content but does not authenticate a sender; HMAC verification happens at the HTTP boundary. Direct library and CLI access is trusted local operator access. Handlers receive the claimed job, including the private token, and return normally to acknowledge or raise an `Exception` to fail. Long handlers must arrange explicit renewal before expiry or stay below the lease duration: there is no automatic renewal thread or handler timeout. External effects still require the caller's own idempotency. KeyboardInterrupt/SystemExit propagate and leave the lease for expiry recovery; inbox storage/I/O errors also propagate.
+`ingest` validates content but does not authenticate a sender; HMAC verification happens at the HTTP boundary, and library and CLI access is trusted local access. A handler returns normally to acknowledge the job or raises an `Exception` to fail it. There is no automatic lease renewal or handler timeout, so a long handler must call `renew` before its lease expires. External side effects still need their own idempotency. See the [worker library contract](docs/API.md#local-worker-library-and-receipt-format).
 
 ## Inspect the engineering
 
@@ -150,7 +153,7 @@ Start with [`store.py`](relaybox/store.py) for atomic `BEGIN IMMEDIATE` claims a
 python3 -m unittest discover -v
 ```
 
-CI runs the complete suite, installs the package, executes the installed CLI outside the checkout, requests assets from the installed server, and verifies signed ingestion → receipt processing → acknowledgment plus snapshot → new-path recovery on Python 3.11 and 3.13. A separate CI job installs the built wheel outside the checkout and checks the served dashboard in Chromium with the development tooling in [`browser/`](browser/README.md). After installation, run `python examples/verify_install.py`, `python examples/verify_worker.py`, and `python examples/verify_backup.py` with that environment's interpreter. Read [verification evidence](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
+CI runs this suite on Python 3.11 and 3.13, then installs the package and runs the installed CLI, worker and backup checks from outside the checkout. A separate job checks the installed dashboard in Chromium with the tooling in [`browser/`](browser/README.md). To repeat the installed checks, run `python examples/verify_install.py`, `python examples/verify_worker.py` and `python examples/verify_backup.py` with the installed environment's interpreter. Read [what CI verifies](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
 
 ## Limits that matter
 
@@ -159,6 +162,6 @@ CI runs the complete suite, installs the package, executes the installed CLI out
 - **Small scope:** 64 KiB JSON objects, 32 active HTTP handlers, three-second socket read timeout, 10-second SQLite busy timeout. The local worker bounds claims, not handler runtime. No outbound delivery, rate quotas, background scheduler, automatic lease renewal, or distributed worker coordination.
 - **Recovery requires activity:** expiry is reconciled on the next claim. The dashboard reports persisted state and may show an expired lease until a worker polls.
 - **Storage is bounded only by your disk:** no retention, encryption at rest, automatic backups, migrations beyond schema version 1, payload search, or full audit history. The dashboard shows the latest 100 matches; the API allows up to 500.
-- **Demonstration evidence:** synthetic records and deterministic logical state transitions, with measured local checks. No customer usage, production reliability, deployment-capacity benchmark, or independent security audit claims.
+- **Demonstration only:** synthetic data and local checks. No production use, capacity benchmark or independent security audit.
 
 See [SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under [MIT](LICENSE).

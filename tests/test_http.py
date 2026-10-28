@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
+from relaybox import __version__
 from relaybox.auth import sign
 from relaybox.server import make_server
 from relaybox.store import Inbox
@@ -67,6 +68,11 @@ class HTTPTests(unittest.TestCase):
         self.assertFalse(json.loads(second[2])["created"])
         other = b'{"event":"other"}'
         self.assertEqual(self.request("POST", "/webhooks", other, self.headers(other))[0], 409)
+
+    def test_server_header_reports_the_package_version(self):
+        status, headers, _ = self.request("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Server"].strip(), f"RelayBox/{__version__}")
 
     def test_auth_rejections_do_not_persist(self):
         before = sum(self.inbox.stats().values())
