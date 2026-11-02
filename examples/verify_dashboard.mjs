@@ -61,12 +61,12 @@ try {
   assert.equal(await text("leases-reclaimable"), "2");
   assert.equal(await text("leased"), "3"); // diagnostics never reconcile rows
   assert.equal(await text("oldest-ready"), "About 3.3 minutes since ready"); // Exact API value: 200 seconds.
-  assert.equal(await text("next-retry"), "— No delayed queued jobs");
-  assert.equal(await text("next-expiry"), "— No active leases");
+  assert.equal(await text("next-retry"), "No delayed jobs");
+  assert.equal(await text("next-expiry"), "No active leases");
   await control({empty: true});
   await refresh();
   assert.equal(await text("queued"), "0");
-  assert.equal(await text("oldest-ready"), "— No ready queued jobs");
+  assert.equal(await text("oldest-ready"), "No ready jobs");
   await page.waitForFunction(() => document.getElementById("status").textContent.includes("No deliveries"));
   assert.equal(await page.locator("#rows tr").count(), 0);
 

@@ -4,9 +4,9 @@ let generation = 0;
 let detailGeneration = 0;
 const labels = {queued: "Queued", leased: "Leased", succeeded: "Succeeded", dead_letter: "Dead letter"};
 const date = (seconds) => {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "— Unavailable";
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "Unavailable";
   const value = new Date(seconds * 1000);
-  return Number.isNaN(value.getTime()) ? "— Unavailable" : value.toLocaleString();
+  return Number.isNaN(value.getTime()) ? "Unavailable" : value.toLocaleString();
 };
 const operationIds = ["queued-ready", "queued-delayed", "leases-active", "leases-reclaimable", "leases-exhausted", "oldest-ready", "next-retry", "next-expiry"];
 // The API keeps exact seconds. The display rounds to at most one decimal place
@@ -15,7 +15,7 @@ const amount = new Intl.NumberFormat(undefined, {maximumFractionDigits: 1});
 const plural = new Intl.PluralRules("en", {maximumFractionDigits: 1});
 
 function readyWait(seconds) {
-  if (seconds === null) return "— No ready queued jobs";
+  if (seconds === null) return "No ready jobs";
   // Never invent a wait: the caller's error path clears the whole snapshot.
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) throw new Error("invalid oldest ready wait");
   if (seconds === 0) return `${amount.format(0)} seconds since ready`;
@@ -36,9 +36,9 @@ function renderMetrics(metrics) {
     byId(id).textContent = String(metrics[key]);
   }
   byId("oldest-ready").textContent = wait;
-  byId("next-retry").textContent = metrics.next_retry_at === null ? "— No delayed queued jobs" : date(metrics.next_retry_at);
-  byId("next-expiry").textContent = metrics.next_lease_expiry === null ? "— No active leases" : date(metrics.next_lease_expiry);
-  byId("metrics-status").textContent = `Inbox snapshot at ${date(metrics.snapshot_at)} (local time). Readiness and expiry are measured at this moment.`;
+  byId("next-retry").textContent = metrics.next_retry_at === null ? "No delayed jobs" : date(metrics.next_retry_at);
+  byId("next-expiry").textContent = metrics.next_lease_expiry === null ? "No active leases" : date(metrics.next_lease_expiry);
+  byId("metrics-status").textContent = `Snapshot at ${date(metrics.snapshot_at)}, local time. Readiness and expiry are measured at that moment.`;
   byId("metrics-status").dataset.state = "ready";
 }
 
@@ -57,7 +57,7 @@ async function inspect(id, delivery) {
     const {job} = await readJSON(`/api/jobs/${id}`);
     if (current !== detailGeneration) return;
     byId("payload").textContent = JSON.stringify(job.payload, null, 2);
-    byId("detail-meta").textContent = `${labels[job.state]} · SHA-256 ${job.digest} · ${job.replay_count} explicit replays`;
+    byId("detail-meta").textContent = `${labels[job.state]} · ${job.replay_count} ${job.replay_count === 1 ? "replay" : "replays"} · SHA-256 ${job.digest}`;
   } catch (error) {
     if (current !== detailGeneration) return;
     byId("detail-meta").textContent = `Could not load delivery: ${error.message}`;
@@ -197,7 +197,7 @@ async function refresh() {
     if (current !== generation) return;
     clearMetrics();
     byId("metrics-status").dataset.state = "error";
-    byId("metrics-status").textContent = `Snapshot unavailable: ${error.message}. Counts and times are unavailable; refresh to retry.`;
+    byId("metrics-status").textContent = `Snapshot unavailable: ${error.message}. Refresh to try again.`;
   });
   const jobs = readJSON(`/api/jobs?limit=100${state ? `&state=${encodeURIComponent(state)}` : ""}`).then(({jobs}) => {
     if (current === generation) renderJobs(jobs);

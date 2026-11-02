@@ -2,102 +2,68 @@
 
 [![RelayBox checks](https://github.com/ult666666/relaybox/actions/workflows/ci.yml/badge.svg)](https://github.com/ult666666/relaybox/actions/workflows/ci.yml)
 
-**A signed webhook inbox you can inspect, retry, and recover locally.**
+RelayBox is a webhook inbox and outbox that runs locally on Python 3.11+ and SQLite, with no
+runtime dependencies. It accepts HMAC-signed deliveries, drops duplicates, and hands each one to a
+worker through a leased job with retries and a dead-letter queue. It also sends your own events
+to subscribers, signed per the
+[Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
+spec, with jittered retries and replay. A small dashboard shows both sides.
 
-RelayBox is a Python 3.11+ engineering demo built with the standard library and SQLite. It receives authenticated JSON deliveries, deduplicates by delivery ID **and exact payload digest**, and exposes a small durable job state machine. It also sends webhooks: subscribers get messages signed per the [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) specification, with jittered retries, a dead-letter queue and replay. An accessible dashboard makes queued work, active leases, successful acknowledgments, and dead letters visible.
+![The RelayBox dashboard with the synthetic demo data: inbox totals and the snapshot details, four inbound deliveries, one payload, and four outbound deliveries to a loopback subscriber, one per state, with a Replay button on the dead letter](docs/dashboard.png)
 
-No runtime dependencies or external services, and by default it only sends to loopback addresses. This is an educational portfolio project built with AI assistance, not a production service; see [Limits that matter](#limits-that-matter).
+## Run it
 
-![RelayBox 0.5.0 local dashboard with the synthetic demo data: four inbound deliveries, the whole-inbox operations summary, and four outbound deliveries to a loopback subscriber, one per state, with a Replay button on the dead letter](docs/dashboard.png)
-
-## Run in a minute
-
-From a checkout, no installation is necessary:
+From a checkout, with no installation:
 
 ```bash
 python3 -m relaybox --db .local/demo.sqlite3 demo
 python3 -m relaybox --db .local/demo.sqlite3 serve --demo-secret
 ```
 
-Open **http://127.0.0.1:8787**. If that port is occupied, add `--port 8797` to the serve command and open the matching port. The demo seeds one inbound delivery and one outbound delivery in each state, using visibly synthetic English/Mandarin payloads, without sending any request. It refuses to overwrite a nonempty database. Choose a new database path to start another demo. Stop the server with Ctrl+C.
+Open http://127.0.0.1:8787. The demo seeds one inbound and one outbound delivery in each state,
+with synthetic payloads, and sends no request. `--demo-secret` uses a public key that is only for
+synthetic data; for your own experiments, set `RELAYBOX_SECRET` to a random value of at least 16
+bytes instead. The [guide](docs/GUIDE.md#run-the-demo) covers installing the CLI and the other
+options.
 
-The `--demo-secret` key is public: `relaybox-synthetic-demo-secret-only`. It is appropriate only for synthetic local data. For your own local experiment, set `RELAYBOX_SECRET` to a random value of at least 16 bytes and omit that flag. Keep database files in a private directory.
+## A tour of the API
 
-To install the CLI in an isolated environment:
+### Receive
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install .
-.venv/bin/relaybox --help
-.venv/bin/relaybox --db .local/installed.sqlite3 demo
-```
-
-PowerShell users can use `.venv\Scripts\python.exe` and `.venv\Scripts\relaybox.exe`. Building uses the exact setuptools version in `pyproject.toml`; the running application uses only Python's standard library. No PyPI release is implied.
-
-## Send a signed delivery
-
-With the demo server running on its default port 8787, run this in another terminal from the checkout. The client sends only to that fixed loopback address:
+With the demo server running, send a signed delivery from another terminal:
 
 ```bash
 python3 examples/send_webhook.py
 ```
 
-Expected result: HTTP `202` with `created: true`, then HTTP `200` for the identical repeat. Reusing that ID with different bytes returns `409`. Click **Refresh** on the dashboard to see the new delivery.
+`POST /webhooks` answers `202` for a new delivery, `200` for an identical repeat and `409` when
+the same delivery ID arrives with different bytes. The HMAC covers the timestamp, the delivery ID
+and the raw body, and a timestamp more than five minutes from the server's clock is refused.
+`python3 -m relaybox sign ID FILE --demo-secret` prints the headers for any JSON file.
 
-For any UTF-8 JSON object file, obtain signing headers with:
+### Process
 
-```bash
-python3 -m relaybox sign example-001 examples/payload.json --demo-secret
-```
-
-Send those headers and the **unchanged file bytes** to `POST /webhooks` within five minutes. The signature covers `timestamp + "." + delivery_id + "." + raw_body`. Signing the ID prevents a valid body/signature from being reused under another delivery ID. See the full [HTTP contract](docs/API.md).
-
-## Work and recover
-
-Process ready synthetic deliveries into local JSON receipts:
+A worker claims ready jobs under a lease and acknowledges or fails each one:
 
 ```bash
 python3 -m relaybox --db .local/demo.sqlite3 work --receipts .local/receipts --max-jobs 10
 ```
 
-The worker claims at most 10 jobs and stops as soon as none is ready; it does not wait for future retries. Each written receipt is acknowledged, and a handler failure follows the retry and dead-letter policy. It prints a summary such as `{"claimed":1,"succeeded":1,"failed":0,"lost_leases":0}`. Defaults: `--max-jobs 1` (up to 1000), `--worker local-worker` and `--lease-seconds 30`.
+`work` writes each payload to a local JSON receipt file and acknowledges the job. A failure
+schedules a retry with exponential backoff, and the last failure moves the job to `dead_letter`,
+where `replay JOB_ID` can requeue it. `claim`, `renew`, `ack` and `fail` do the same steps by hand
+with the lease token that `claim` returns.
 
-Each receipt holds a format version, the delivery ID, the SHA-256 digest of the original body and the parsed payload. Its filename hashes the delivery ID with the body digest, so path-like IDs cannot escape the directory. Running a job again finds the identical receipt and succeeds without rewriting it; a conflicting or corrupt receipt fails instead of being overwritten. This shows local idempotency only, with no distributed exactly-once or power-loss guarantee. See the [receipt format and file-safety rules](docs/API.md#local-worker-library-and-receipt-format).
+### Deliver
 
-For manual ownership and recovery:
-
-```bash
-python3 -m relaybox --db .local/demo.sqlite3 list --state dead_letter
-python3 -m relaybox --db .local/demo.sqlite3 replay 3
-python3 -m relaybox --db .local/demo.sqlite3 claim --worker local-reviewer --lease-seconds 30
-```
-
-The claim response includes a private `lease_token`. Complete the claimed ID with that token before expiry:
-
-```bash
-# Extend a still-current lease before expiry (same token, no new attempt):
-python3 -m relaybox --db .local/demo.sqlite3 renew JOB_ID --token TOKEN --lease-seconds 60
-python3 -m relaybox --db .local/demo.sqlite3 ack JOB_ID --token TOKEN
-# Or record a failure; this schedules a retry or ends in dead_letter:
-python3 -m relaybox --db .local/demo.sqlite3 fail JOB_ID --token TOKEN --error "Synthetic local failure"
-```
-
-- Commands print JSON and exit `0` on success, or `2` for invalid arguments and failed operations. `work` exits `1` if a handler failed or a lease was lost.
-- An empty claim succeeds and returns `{"job": null}`.
-- `replay` only accepts dead letters, and each replay resets the attempt budget.
-- Worker operations stay in the CLI and library, so the dashboard cannot change jobs.
-
-## Deliver to subscribers
-
-Version 0.5.0 adds outbound delivery. A subscription holds an endpoint URL, the event types it wants and one or more signing secrets. Publishing a message queues one delivery per matching subscription. `deliver` sends each one as a JSON POST with the three [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) headers: `webhook-id`, `webhook-timestamp` and `webhook-signature` (`v1,` plus the base64 HMAC-SHA256 of `id.timestamp.body`).
-
-Start the example receiver in one terminal. It checks every signature with its own code, and here it answers 503 to the first delivery:
+Start the example receiver in one terminal. It checks every signature and answers 503 to the
+first attempt:
 
 ```bash
 python3 examples/receive_webhooks.py --demo-secret --fail-first 1
 ```
 
-In another terminal, subscribe it, publish a message and deliver:
+In another terminal, subscribe it, publish an event and run the dispatcher:
 
 ```bash
 python3 -m relaybox --db .local/out.sqlite3 subscription add http://127.0.0.1:8788/hook --event-type example.created --demo-secret
@@ -105,103 +71,80 @@ python3 -m relaybox --db .local/out.sqlite3 publish example.created examples/pay
 python3 -m relaybox --db .local/out.sqlite3 deliver --max-deliveries 10 --wait 15
 ```
 
-The first attempt gets 503 with `Retry-After: 1`. `--wait` keeps the dispatcher running until the retry is due, and the second attempt succeeds with the same `webhook-id` and a new timestamp. `deliveries --state dead_letter` lists failures, and `replay-delivery ID` requeues one. Without `--demo-secret`, `subscription add` generates a secret and prints it once; give it to the receiver with `--secret`.
+The first attempt gets 503 with `Retry-After: 1`, and the retry succeeds with the same
+`webhook-id`. `relay` turns inbound jobs into outbound events, and `replay-delivery ID` requeues
+an outbound dead letter.
 
-- **Retries:** each retry waits a random time between 0 and `min(max_delay, base_delay × 2^(attempts−1))` ("full jitter"), so endpoints that fail together are not retried together. A `Retry-After` header (seconds or an HTTP date) raises the wait to at least that value, capped at `max_delay`. Defaults: 6 attempts, base 2 s, cap 300 s.
-- **Status codes:** 2xx succeeds. 408, 429, 5xx, timeouts and connection errors retry. 410 Gone dead-letters the delivery and disables the subscription. Every 3xx and every other 4xx dead-letters at once; redirects are never followed.
-- **Bounds:** each attempt has a wall-clock deadline (`--timeout`, default 15 s) and reads at most 4 KiB of the response body. The lease must be longer than the deadline, so the dispatcher never needs to renew it.
-- **Crashes:** a dispatcher that dies mid-request keeps its lease until it expires. Another dispatcher then sends the same message again with the same `webhook-id`, so receivers should drop repeats of an ID they have already processed.
-- **Targets:** only literal loopback addresses (`127.0.0.0/8` and `::1`) are accepted; `localhost` is not resolved. A non-loopback endpoint needs `--allow-remote` on both `subscription add` and `deliver`, and HTTPS with certificate checks. Read [SECURITY.md](SECURITY.md) first.
-- **Key rotation:** `subscription rotate-secret ID --grace-seconds 3600` adds a new secret. Until the grace period ends, every delivery carries one signature per active secret, so the receiver can switch keys without failed deliveries.
-- **Relay:** `relay --max-jobs 10` fans ready inbound jobs out to subscribers, using the payload's top-level `type` field as the event type. The outbound `webhook-id` is derived from the inbound delivery, so relaying the same job twice queues nothing new.
-- **Dashboard:** the Outbound delivery panel lists the latest deliveries and their last result. Start `serve` with `--allow-replay` to replay dead letters from the page; otherwise the page is read-only and you use the CLI.
+### Observe and recover
 
-## Understand an idle worker
+`GET /api/metrics` (and the dashboard) separates queued work that is
+ready from delayed retries, and active leases from expired ones, without changing any job.
+`backup` takes a consistent online snapshot, `verify-backup` checks one, and `restore` copies one
+to a new path.
 
-Version 0.4.0 adds a read-only operations summary. Use Refresh in the dashboard, or GET `/api/metrics` from the local server, to tell queued work that is ready now from delayed retries, and active leases from expired ones. The four state cards still show persisted totals: an expired lease with no attempts left stays in **Leased** until a worker's next claim moves it to dead letter. Viewing diagnostics never claims or changes a job.
+[docs/GUIDE.md](docs/GUIDE.md) walks through each workflow with its options and expected output,
+including the library API. [docs/API.md](docs/API.md) is the full HTTP, CLI and library contract.
 
-The oldest ready wait is the time since a job became ready (`available_at`), not the time since ingestion. The dashboard rounds it, for example `About 4.6 seconds since ready`, and the API keeps exact seconds. Refresh is manual. If one section fails to load, it shows an error and the other keeps working.
+## Design notes
 
-Library users can call `inbox.metrics()` on an existing `Inbox`. It returns a read-only, local diagnostic snapshot: its query can scan every row, but never selects payloads or private job fields. See the [exact metrics contract](docs/API.md#queue-metrics).
+- Each job and outbound delivery has one owner at a time. A claim runs in a `BEGIN IMMEDIATE`
+  transaction and issues a random 256-bit lease token, and acknowledging, failing or renewing
+  requires the current, unexpired token. A worker whose lease expired cannot finish the job.
+- Inbound jobs and outbound deliveries share this lease state machine (`store.LeaseQueue`), so
+  claims, completion, dead letters and replay follow the same rules; only the retry schedule
+  differs.
+- Delivery is at least once. A crashed worker's job is claimed again after its lease expires, and
+  an outbound retry keeps its `webhook-id`, so receivers can drop repeats.
+- Outbound retries use full jitter: a random wait between 0 and the exponential backoff, raised
+  to honor `Retry-After`. 2xx succeeds; 408, 429, 5xx and network errors retry; 410 disables the
+  subscription; other 4xx and every 3xx dead-letter at once.
+- Each outbound attempt is bounded by a wall-clock deadline and, by default, a 4 KiB response
+  read, and redirects are never followed.
+- Secret rotation signs with every active key during a grace period, so receivers can switch keys
+  without failed deliveries.
+- Backups use SQLite's online backup API inside a pinned read transaction, so a snapshot is
+  consistent while writers keep committing.
 
-To inspect that scan cost, use the source-only [local measurement tool](docs/PERFORMANCE.md). It checks a fixed synthetic workload against an independent oracle, then retains raw installed-library call timings and environment metadata. No production capacity or timing threshold is implied.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains each mechanism and its trade-offs.
 
-## Back up and drill recovery
-
-Version 0.3.0 adds consistent local SQLite snapshots. Never copy just a live inbox's main file: committed jobs may still be in its WAL. Choose an existing trusted private directory and fresh destination names:
-
-```bash
-python3 -m relaybox --db .local/demo.sqlite3 backup .local/snapshot.sqlite3 --timeout 10
-python3 -m relaybox verify-backup .local/snapshot.sqlite3
-```
-
-`backup` prints a JSON receipt with the paths, schema version, integrity result, job counts, SHA-256 and file size; it never includes payloads or lease tokens. The **snapshot itself contains all data, including tokens and payloads**, so protect it like the original. A backup includes committed WAL data, leaves out uncommitted changes, and refuses to overwrite any existing path.
-
-Before switching to a restored path, **stop the original service and every original worker**. Keep the original stopped during the drill. Restore to a new name; do not initialize that destination first:
-
-```bash
-python3 -m relaybox --db .local/recovered.sqlite3 restore .local/snapshot.sqlite3
-python3 -m relaybox --db .local/recovered.sqlite3 stats
-python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipts --max-jobs 10
-```
-
-Compare the restored counts with the saved backup receipt before processing work. Attempts, retry policy, replay counts and leases survive exactly, and the next claim reclaims or dead-letters any expired lease. Keep the receipt directory as well, because the database backup does not include it, and expect work done after the snapshot to repeat. There is no cross-database exactly-once guarantee.
-
-Backups support trusted, operator-owned RelayBox databases up to 1 GiB, with a deadline of 0.1 to 60 seconds (default 10). `verify-backup` needs a standalone snapshot that nothing is writing to, so run `backup` first for a live inbox. See the [complete contract](docs/API.md#backup-and-recovery-contract) for the file-safety rules and platform limits.
-
-After installing, `python examples/verify_backup.py` performs an isolated synthetic backup → verify → restore → expired-lease receipt drill outside the checkout.
-
-## Library API
-
-```python
-from relaybox.store import Inbox
-from relaybox.worker import ReceiptHandler, run_worker
-
-inbox = Inbox("inbox.sqlite3", max_attempts=3, base_delay=2, max_delay=60)
-job, created = inbox.ingest("example-001", b'{"synthetic":true}')
-summary = run_worker(inbox, ReceiptHandler("receipts"), max_jobs=10)
-print(summary)
-
-# Or pass your own local idempotent handler:
-inbox.ingest("example-002", b'{"synthetic":true}')
-def handle(job):
-    print(job["payload"]["synthetic"])
-    # Before a long phase, while ownership is still valid:
-    inbox.renew(job["id"], job["lease_token"], lease_seconds=60)
-
-run_worker(inbox, handle, worker="example-worker", lease_seconds=30)
-
-# Outbound: subscribe, publish and attempt delivery (loopback endpoints only).
-from relaybox.dispatch import run_dispatcher
-from relaybox.outbound import Outbox
-
-outbox = Outbox("inbox.sqlite3", max_attempts=10, base_delay=5, max_delay=3600)
-subscription, secret = outbox.subscribe("http://127.0.0.1:8788/hook", ["example.created"])
-outbox.publish("example.created", b'{"type":"example.created","synthetic":true}')
-print(run_dispatcher(outbox, max_deliveries=10, timeout=15, lease_seconds=60))
-```
-
-`ingest` validates content but does not authenticate a sender; HMAC verification happens at the HTTP boundary, and library and CLI access is trusted local access. A handler returns normally to acknowledge the job or raises an `Exception` to fail it. There is no automatic lease renewal or handler timeout, so a long handler must call `renew` before its lease expires. External side effects still need their own idempotency. See the [worker library contract](docs/API.md#local-worker-library-and-receipt-format).
-
-## Inspect the engineering
-
-Start with [`store.py`](relaybox/store.py) for atomic `BEGIN IMMEDIATE` claims and token checks, shared by inbox jobs and outbound deliveries, then [`tests/test_store.py`](tests/test_store.py) for real multi-connection contention and expired-worker rejection. [`tests/test_http.py`](tests/test_http.py) exercises live TCP requests, malformed framing, size limits, clock checks, hostile content, and JSON error responses. For outbound delivery, read [`dispatch.py`](relaybox/dispatch.py) and [`tests/test_dispatch.py`](tests/test_dispatch.py), which run the dispatcher against loopback receivers that answer 500s, stall, trickle bytes, refuse connections, redirect and send malformed status lines, and kill a dispatcher mid-request with SIGKILL. [`tests/test_standard_webhooks.py`](tests/test_standard_webhooks.py) checks signing against the specification's published test vector.
+## Tests
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-CI runs this suite on Python 3.11 and 3.13, then installs the package and runs the installed CLI, worker, backup and outbound delivery checks from outside the checkout. A separate job checks the installed dashboard in Chromium with the tooling in [`browser/`](browser/README.md). To repeat the installed checks, run `python examples/verify_install.py`, `python examples/verify_worker.py`, `python examples/verify_backup.py` and `python examples/verify_outbound.py` with the installed environment's interpreter. Read [what CI verifies](docs/VERIFICATION.md), [architecture](docs/ARCHITECTURE.md), [API](docs/API.md), or the [中文指南](docs/GUIDE.zh-CN.md).
+The tests run real SQLite connections, live HTTP sockets and CLI subprocesses.
+[`tests/test_store.py`](tests/test_store.py) races workers across connections and checks that an
+expired worker is rejected. [`tests/test_http.py`](tests/test_http.py) sends malformed framing,
+oversized bodies, stale timestamps and hostile content. [`tests/test_dispatch.py`](tests/test_dispatch.py)
+runs the dispatcher against loopback receivers that fail, stall, trickle bytes, refuse
+connections, redirect and send malformed status lines, and kills a dispatcher mid-request.
+[`tests/test_standard_webhooks.py`](tests/test_standard_webhooks.py) checks signing against the
+specification's published test vector.
 
-## Limits that matter
+CI runs the suite on Python 3.11 and 3.13, then installs the package and runs the installed CLI,
+worker, backup and outbound checks from outside the checkout. A separate job drives the installed
+dashboard in Chromium. [docs/VERIFICATION.md](docs/VERIFICATION.md) lists every check and how to
+run it locally.
 
-- **Local only:** IPv4 loopback, plain HTTP, one shared HMAC key for inbound ingestion with no rotation; no account authentication, multi-tenant permissions, or TLS deployment configuration. Any process/user with local HTTP access can read payloads, and with `--allow-replay` can also replay outbound dead letters.
-- **At least once:** a lease can expire during work. Tokens fence acknowledgments in this SQLite database; they cannot undo or prevent external side effects. Consumers need their own idempotency strategy.
-- **Small scope:** 64 KiB JSON objects, 32 active HTTP handlers, three-second socket read timeout, 10-second SQLite busy timeout. The local worker bounds claims, not handler runtime. No rate quotas, background scheduler, automatic lease renewal for inbound handlers, or distributed worker coordination.
-- **Outbound delivery is a bounded command, not a service:** `deliver` attempts at most 1,000 deliveries per run and waits only while `--wait` lasts. There is no per-endpoint rate limit, concurrency cap or circuit breaker, no attempt history (only each delivery's latest result), and no delivery of earlier messages to new subscriptions. Unless a receiver sends `Retry-After`, the default schedule waits at most 62 seconds in total across its 5 retries (2 + 4 + 8 + 16 + 32), which suits a demo; production schedules span days. At most 100 active subscriptions and 5 active secrets each.
-- **Remote targets are opt-in and unfiltered:** `--allow-remote` permits any HTTPS host. It adds no filtering of private address ranges, no DNS pinning and no egress proxy. The attempt deadline does not cover the DNS lookup, and each address a host name resolves to gets its own connection timeout, so one attempt to a name with several unreachable addresses can last several times `--timeout`. Signing secrets are stored unencrypted in the database and its backups.
-- **Recovery requires activity:** expiry is reconciled on the next claim. The dashboard reports persisted state and may show an expired lease until a worker polls.
-- **Storage is bounded only by your disk:** no retention, encryption at rest, automatic backups, migrations beyond the additive version 1 to 2 upgrade, payload search, or full audit history. The dashboard shows the latest 100 matches; the API allows up to 500.
-- **Demonstration only:** synthetic data and local checks. No production use, capacity benchmark or independent security audit.
+## Limits
 
-See [SECURITY.md](SECURITY.md) and [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under [MIT](LICENSE).
+- It serves only 127.0.0.1 over plain HTTP, with one shared HMAC key for inbound requests and no
+  user accounts.
+- Delivery is at least once, so handlers and receivers must make their own side effects
+  idempotent.
+- `deliver` is a bounded command rather than a background service, with no per-endpoint rate
+  limit or circuit breaker.
+- Signing secrets and payloads are stored unencrypted in the database and its backups.
+- It is a demonstration with synthetic data: there is no capacity benchmark or independent
+  security audit.
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#limits-in-detail) lists every limit in detail.
+
+## More
+
+[Architecture](docs/ARCHITECTURE.md) · [Guide](docs/GUIDE.md) · [API](docs/API.md) ·
+[Verification](docs/VERIFICATION.md) · [Measurement](docs/PERFORMANCE.md) ·
+[中文指南](docs/GUIDE.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+
+Built with AI coding assistants. Licensed under [MIT](LICENSE).
