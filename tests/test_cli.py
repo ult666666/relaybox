@@ -230,3 +230,73 @@ class RecoveryCLITests(unittest.TestCase):
             self.assertIn("error", json.loads(result.stderr))
             self.assertNotIn("Traceback", result.stderr)
             self.assertFalse(backup.exists())
+
+
+class OutboundCLITests(unittest.TestCase):
+    setUp = CLITests.setUp
+    run_cli = CLITests.run_cli
+
+    def ok(self, *args, code=0):
+        result = self.run_cli(*args)
+        self.assertEqual(result.returncode, code, (args, result.stdout, result.stderr))
+        self.assertNotIn("Traceback", result.stderr)
+        return json.loads(result.stdout) if code != 2 else json.loads(result.stderr)
+
+    def test_subscription_commands_print_a_secret_only_when_it_is_created(self):
+        added = self.ok("subscription", "add", "http://127.0.0.1:9/hook", "--event-type", "b.created", "--event-type", "a.created")
+        self.assertTrue(added["secret"].startswith("whsec_"))
+        self.assertEqual(added["subscription"]["event_types"], ["a.created", "b.created"])
+        listed = self.run_cli("subscription", "list")
+        self.assertNotIn(added["secret"][len("whsec_"):], listed.stdout)
+        self.assertEqual(json.loads(listed.stdout)["subscriptions"][0]["secrets"][0]["fingerprint"],
+                         added["subscription"]["secrets"][0]["fingerprint"])
+        rotated = self.ok("subscription", "rotate-secret", "1", "--grace-seconds", "60")
+        self.assertNotEqual(rotated["secret"], added["secret"])
+        self.assertEqual([item["active"] for item in rotated["subscription"]["secrets"]], [True, True])
+        self.assertEqual(self.ok("subscription", "disable", "1")["subscription"]["state"], "disabled")
+        self.assertEqual(self.ok("subscription", "enable", "1")["subscription"]["state"], "active")
+        from relaybox.outbound import DEMO_SECRET
+        self.assertEqual(self.ok("subscription", "add", "http://[::1]:9/", "--event-type", "*", "--demo-secret")["secret"], DEMO_SECRET)
+        refused = self.ok("subscription", "add", "https://hooks.example.com/in", "--event-type", "x", code=2)
+        self.assertIn("non-loopback", refused["error"])
+        self.assertIn("https", self.ok("subscription", "add", "http://hooks.example.com/in", "--event-type", "x", "--allow-remote", code=2)["error"])
+        self.ok("subscription", "add", "https://hooks.example.com/in", "--event-type", "x", "--allow-remote")
+        self.assertEqual(self.ok("subscription", "rotate-secret", "99", code=2), {"error": "subscription not found"})
+        self.assertEqual(self.run_cli("subscription", "add", "http://127.0.0.1:9/", "--event-type", "x", "--demo-secret",
+                                      "--secret", added["secret"]).returncode, 2)
+
+    def test_publish_deliver_replay_journey_against_a_live_receiver(self):
+        from relaybox.outbound import DEMO_SECRET
+        from tests.receivers import Receiver, independent_verify
+        payload = Path(self.tmp.name) / "payload.json"
+        payload.write_bytes(b'{"type":"example.created","synthetic":true}')
+        with Receiver(422, 204) as receiver:
+            self.ok("subscription", "add", receiver.url(), "--event-type", "example.created", "--demo-secret")
+            published = self.ok("publish", "example.created", str(payload), "--webhook-id", "msg_cli_1")
+            self.assertEqual((published["created"], published["message"]["deliveries"]), (True, 1))
+            self.assertFalse(self.ok("publish", "example.created", str(payload), "--webhook-id", "msg_cli_1")["created"])
+            failed = self.ok("deliver", "--timeout", "2", "--lease-seconds", "5", code=1)
+            self.assertEqual((failed["claimed"], failed["dead_lettered"]), (1, 1))
+            dead = self.ok("deliveries", "--state", "dead_letter")
+            self.assertEqual([row["webhook_id"] for row in dead["deliveries"]], ["msg_cli_1"])
+            self.assertEqual(dead["counts"]["dead_letter"], 1)
+            self.assertEqual(self.ok("replay-delivery", "1")["delivery"]["state"], "queued")
+            self.assertEqual(self.ok("deliver", "--timeout", "2", "--lease-seconds", "5")["succeeded"], 1)
+            self.assertEqual(self.ok("deliver")["claimed"], 0)
+        self.assertEqual([request["headers"]["webhook-id"] for request in receiver.requests], ["msg_cli_1", "msg_cli_1"])
+        self.assertTrue(all(independent_verify(DEMO_SECRET, request["headers"], request["body"]) for request in receiver.requests))
+        self.assertEqual(self.ok("replay-delivery", "999", code=2), {"error": "delivery not found"})
+        self.assertIn("lease_seconds", self.ok("deliver", "--timeout", "30", "--lease-seconds", "30", code=2)["error"])
+        self.assertIn("error", self.ok("publish", "bad type", str(payload), code=2))
+
+    def test_relay_fans_out_inbound_jobs_once(self):
+        from relaybox.store import Inbox
+        inbox = Inbox(self.db)
+        inbox.ingest("inbound-1", b'{"type":"order.paid","synthetic":true}')
+        self.ok("subscription", "add", "http://127.0.0.1:9/hook", "--event-type", "order.paid")
+        self.assertEqual(self.ok("relay", "--max-jobs", "5"), {"claimed": 1, "succeeded": 1, "failed": 0, "lost_leases": 0})
+        queued = self.ok("deliveries")["deliveries"]
+        self.assertEqual([(row["event_type"], row["state"]) for row in queued], [("order.paid", "queued")])
+        self.assertEqual(self.ok("relay")["claimed"], 0)
+        inbox.ingest("inbound-2", b'{"synthetic":true}')
+        self.assertEqual(self.ok("relay", code=1)["failed"], 1)

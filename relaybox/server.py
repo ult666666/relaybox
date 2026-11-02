@@ -11,15 +11,18 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .auth import AuthError, verify
-from .store import Conflict, Inbox, MAX_BODY, ValidationError, validate_delivery_id
+from .outbound import Outbox
+from .store import Conflict, Inbox, InvalidTransition, MAX_BODY, ValidationError, validate_delivery_id
 
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address, handler, *, inbox, secret, read_timeout):
+    def __init__(self, address, handler, *, inbox, secret, read_timeout, outbox, allow_replay):
         self.inbox = inbox
+        self.outbox = outbox
+        self.allow_replay = allow_replay
         self.secret = secret
         self.read_timeout = read_timeout
         self.slots = threading.BoundedSemaphore(32)
@@ -131,6 +134,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValidationError("invalid limit")
                 jobs = self.server.inbox.list_jobs(state=query.get("state", [None])[0], limit=int(limit_text))
                 self._respond(200, {"jobs": jobs, "limit": int(limit_text)})
+            elif path.path == "/api/deliveries":
+                query = parse_qs(path.query, keep_blank_values=True, max_num_fields=8)
+                if any(key not in {"state", "limit"} or len(values) != 1 for key, values in query.items()):
+                    raise ValidationError("use state and limit query parameters once each")
+                limit_text = query.get("limit", ["100"])[0]
+                if not re.fullmatch(r"[0-9]{1,3}", limit_text):
+                    raise ValidationError("invalid limit")
+                listing = self.server.outbox.list_deliveries(state=query.get("state", [None])[0], limit=int(limit_text))
+                self._respond(200, {**listing, "limit": int(limit_text), "replay_enabled": self.server.allow_replay})
             elif re.fullmatch(r"/api/jobs/[1-9][0-9]{0,17}", path.path) and not path.query:
                 job = self.server.inbox.get(int(path.path.rsplit("/", 1)[1]))
                 self._respond(200, {"job": self._safe_job(job)})
@@ -153,8 +165,37 @@ class Handler(BaseHTTPRequestHandler):
         except sqlite3.Error:
             self.send_error(503, "database unavailable")
 
+    def _replay_delivery(self, delivery_id):
+        """The dashboard's only mutation: opt-in, same-origin, bodiless JSON POST."""
+        if not self.server.allow_replay:
+            self.send_error(403, "dashboard replay is off; start serve with --allow-replay or use replay-delivery")
+            return
+        origins = {f"http://127.0.0.1:{self.server.server_port}", f"http://localhost:{self.server.server_port}"}
+        # A cross-site page cannot send this Origin, and the JSON type forces a
+        # CORS preflight that this server never approves.
+        if self.headers.get("Origin") not in origins or self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            self.send_error(403, "replay requires a same-origin request from the dashboard")
+            return
+        if self.headers.get("Content-Type", "").lower() != "application/json" or self.headers.get("Content-Length", "0") != "0":
+            self.send_error(415, "replay requires Content-Type: application/json and an empty body")
+            return
+        try:
+            self._respond(200, {"delivery": self.server.outbox.replay(delivery_id)})
+        except KeyError:
+            self.send_error(404, "delivery not found")
+        except InvalidTransition as exc:
+            self.send_error(409, str(exc))
+        except ValidationError:
+            self.send_error(400, "invalid delivery ID")
+        except sqlite3.Error:
+            self.send_error(503, "database unavailable")
+
     def do_POST(self):
         if not self._boundary():
+            return
+        replay = re.fullmatch(r"/api/deliveries/([1-9][0-9]{0,17})/replay", self.path)
+        if replay:
+            self._replay_delivery(int(replay.group(1)))
             return
         if self.path != "/webhooks":
             self.send_error(404, "route not found")
@@ -208,12 +249,21 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_TRACE = _unsupported
 
 
-def make_server(inbox: Inbox, secret: bytes, *, host="127.0.0.1", port=8787, read_timeout=3):
-    """Create an unstarted bounded server. Binding beyond IPv4 loopback is refused."""
+def make_server(inbox: Inbox, secret: bytes, *, host="127.0.0.1", port=8787, read_timeout=3,
+                outbox: Outbox | None = None, allow_replay=False):
+    """Create an unstarted bounded server. Binding beyond IPv4 loopback is refused.
+
+    The outbox defaults to the inbox's database and clock. allow_replay turns
+    on the dashboard's dead-letter replay route; it is off by default.
+    """
     if host != "127.0.0.1":
         raise ValueError("RelayBox only binds to 127.0.0.1")
     if not isinstance(secret, bytes) or len(secret) < 16:
         raise ValueError("the webhook secret must contain at least 16 bytes")
     if not 0 < read_timeout <= 30:
         raise ValueError("read_timeout must be in (0, 30]")
-    return _Server((host, port), Handler, inbox=inbox, secret=secret, read_timeout=read_timeout)
+    if not isinstance(allow_replay, bool):
+        raise ValueError("allow_replay must be a boolean")
+    outbox = Outbox(inbox.path, clock=inbox.clock) if outbox is None else outbox
+    return _Server((host, port), Handler, inbox=inbox, secret=secret, read_timeout=read_timeout,
+                   outbox=outbox, allow_replay=allow_replay)

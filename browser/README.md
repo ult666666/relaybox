@@ -21,7 +21,9 @@ passed and the fixture shut down cleanly.
 `fixture.py` runs with the given interpreter and `-I` from a temporary directory
 outside the checkout. It asserts that `relaybox` comes from site-packages with
 matching metadata, seeds nine synthetic deliveries at a supplied clock of
-2026-10-23 20:00:00.25 UTC, and serves the installed app on loopback port 0. It
+2026-10-23 20:00:00.25 UTC, records one synthetic outbound delivery per state
+(no request is sent), and serves the installed app on loopback port 0 with
+dashboard replay enabled. It
 accepts only fixed synthetic actions on stdin and shuts down, closes and joins the
 server at the end.
 
@@ -29,7 +31,10 @@ server at the end.
   page shows `About 4.6 seconds since ready`; counts, dates, state filter, payload
   as plain text, keyboard focus, manual refresh after a supplied-clock change and
   an empty inbox, no page overflow at 1440/1280/390/320 px, and the static
-  no-JavaScript shell (data requires JavaScript).
+  no-JavaScript shell (data requires JavaScript). The outbound panel shows the
+  four delivery states and hostile error text as text, offers Replay only on
+  the dead letter, and after a real replay request moves focus to its status
+  line and shows the delivery queued again.
 - **Controlled probes** in the same browser, labeled separately in the receipt:
   substituted metrics responses for duration boundaries, null/zero/invalid waits,
   en-US and de-DE number formatting and year-9999 dates; injected 503s for

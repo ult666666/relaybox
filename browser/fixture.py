@@ -14,6 +14,7 @@ import tempfile
 import threading
 
 import relaybox
+from relaybox.outbound import Outbox, Outcome
 from relaybox.server import make_server
 from relaybox.store import Inbox
 
@@ -55,7 +56,18 @@ def main():
                          attempts, budget, job["id"]))
 
         mixed()
-        server = make_server(inbox, b"synthetic-browser-fixture-secret", port=0)
+        # One outbound delivery per state; outcomes are recorded directly, so
+        # no request is sent. Replay is enabled for this fixture only.
+        outbox = Outbox(inbox.path, clock=lambda: now[0], max_attempts=1)
+        outbox.subscribe("http://127.0.0.1:9/synthetic-browser-endpoint", ["browser.synthetic"])
+        for name in ["done", "dead", "active", "waiting"]:
+            outbox.publish("browser.synthetic", json.dumps({"synthetic": True, "row": name}).encode(),
+                           webhook_id=f"msg_browser_{name}")
+        for outcome in [Outcome("success", 204), Outcome("permanent", 422, '<img src=x onerror="window.pwned=1">')]:
+            claim = outbox.claim("synthetic-dispatcher")
+            outbox.complete(claim["id"], claim["lease_token"], outcome)
+        outbox.claim("synthetic-dispatcher", lease_seconds=600)
+        server = make_server(inbox, b"synthetic-browser-fixture-secret", port=0, allow_replay=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         try:
             thread.start()

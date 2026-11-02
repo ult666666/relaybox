@@ -11,8 +11,10 @@ import time
 from .auth import sign
 from .backup import backup_database, verify_backup
 from .demo import seed_demo
+from .dispatch import run_dispatcher
+from .outbound import DEMO_SECRET as OUTBOUND_DEMO_SECRET, Outbox, RelayHandler
 from .server import make_server
-from .store import Conflict, Inbox, InvalidTransition, ValidationError, parse_payload, validate_delivery_id
+from .store import STATES, Conflict, Inbox, InvalidTransition, ValidationError, parse_payload, validate_delivery_id
 from .worker import ReceiptHandler, run_worker
 
 DEMO_SECRET = b"relaybox-synthetic-demo-secret-only"
@@ -32,7 +34,7 @@ def _print(value):
 
 
 def parser():
-    result = argparse.ArgumentParser(prog="relaybox", description="Local durable signed webhook inbox; no outbound delivery.")
+    result = argparse.ArgumentParser(prog="relaybox", description="Local durable signed webhook inbox with Standard Webhooks outbound delivery.")
     result.add_argument("--db", type=Path, default=Path("inbox.sqlite3"), help="SQLite database path (place before the subcommand)")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="initialize the local database")
@@ -71,6 +73,42 @@ def parser():
     serve = commands.add_parser("serve", help="serve dashboard and webhook endpoint on IPv4 loopback")
     serve.add_argument("--port", type=int, default=8787)
     serve.add_argument("--demo-secret", action="store_true", help="use the public synthetic demo key; no real data")
+    serve.add_argument("--allow-replay", action="store_true", help="let the dashboard replay dead-letter outbound deliveries")
+    subscription = commands.add_parser("subscription", help="manage outbound subscriptions")
+    actions = subscription.add_subparsers(dest="action", required=True)
+    add = actions.add_parser("add", help="subscribe an endpoint URL; prints its new signing secret once")
+    add.add_argument("url")
+    add.add_argument("--event-type", action="append", required=True, help="repeatable; '*' matches every type")
+    add_secret = add.add_mutually_exclusive_group()
+    add_secret.add_argument("--secret", help="use this whsec_ secret instead of generating one")
+    add_secret.add_argument("--demo-secret", action="store_true", help="use the public synthetic outbound demo key")
+    add.add_argument("--allow-remote", action="store_true", help="accept a non-loopback https:// endpoint")
+    actions.add_parser("list", help="list subscriptions and secret fingerprints, never secret values")
+    rotate = actions.add_parser("rotate-secret", help="add a new current secret; older ones sign until the grace period ends")
+    rotate.add_argument("subscription_id", type=int)
+    rotate.add_argument("--grace-seconds", type=float, default=86400)
+    rotate.add_argument("--secret", help="use this whsec_ secret instead of generating one")
+    for name in ["enable", "disable"]:
+        actions.add_parser(name, help=f"{name} a subscription").add_argument("subscription_id", type=int)
+    publish = commands.add_parser("publish", help="store a JSON message and queue one delivery per matching subscription")
+    publish.add_argument("event_type")
+    publish.add_argument("payload", type=Path)
+    publish.add_argument("--webhook-id", help="idempotency key sent as webhook-id (default: random msg_ ID)")
+    relay = commands.add_parser("relay", help="fan ready inbound jobs out to subscriptions by their payload 'type'")
+    relay.add_argument("--worker", default="relay-worker")
+    relay.add_argument("--max-jobs", type=int, default=1)
+    relay.add_argument("--lease-seconds", type=float, default=30)
+    deliver = commands.add_parser("deliver", help="attempt bounded ready outbound deliveries")
+    deliver.add_argument("--worker", default="local-dispatcher")
+    deliver.add_argument("--max-deliveries", type=int, default=1)
+    deliver.add_argument("--lease-seconds", type=float, default=60)
+    deliver.add_argument("--timeout", type=float, default=15, help="per-attempt deadline in seconds (0.01–60)")
+    deliver.add_argument("--wait", type=float, default=0, help="keep claiming for up to this many seconds while retries are pending")
+    deliver.add_argument("--allow-remote", action="store_true", help="allow non-loopback https:// endpoints")
+    deliveries = commands.add_parser("deliveries", help="list latest outbound delivery summaries and counts")
+    deliveries.add_argument("--state", choices=list(STATES))
+    deliveries.add_argument("--limit", type=int, default=100)
+    commands.add_parser("replay-delivery", help="requeue a dead-letter outbound delivery with the same webhook-id").add_argument("delivery_id", type=int)
     signing = commands.add_parser("sign", help="print signature headers for an exact UTF-8 JSON file")
     signing.add_argument("delivery_id")
     signing.add_argument("payload", type=Path)
@@ -111,6 +149,8 @@ def main(argv=None) -> int:
         if args.command == "demo":
             _print(seed_demo(args.db))
             return 0
+        if args.command in {"subscription", "publish", "relay", "deliver", "deliveries", "replay-delivery"}:
+            return _outbound(args, Outbox(args.db))
         inbox = Inbox(args.db)
         if args.command in {"init", "stats"}:
             _print({"database": str(args.db), "counts": inbox.stats()})
@@ -142,10 +182,12 @@ def main(argv=None) -> int:
             job.pop("lease_token", None)
             _print({"job": job})
         elif args.command == "serve":
-            server = make_server(inbox, secret, port=args.port)
+            server = make_server(inbox, secret, port=args.port, allow_replay=args.allow_replay)
             print(f"RelayBox listening at http://127.0.0.1:{args.port}", flush=True)
             if args.demo_secret:
                 print("Synthetic demo key enabled. Use synthetic data only.", flush=True)
+            if args.allow_replay:
+                print("Dashboard replay of dead-letter deliveries is enabled.", flush=True)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
@@ -154,10 +196,47 @@ def main(argv=None) -> int:
                 server.server_close()
         return 0
     except (ValidationError, Conflict, InvalidTransition, KeyError, OSError, sqlite3.Error) as exc:
-        message = "job not found" if isinstance(exc, KeyError) else str(exc)
+        missing = {"subscription": "subscription not found", "replay-delivery": "delivery not found"}.get(args.command, "job not found")
+        message = missing if isinstance(exc, KeyError) else str(exc)
         # JSON escapes terminal control characters and preserves machine-readable errors.
         print(json.dumps({"error": message}, ensure_ascii=True), file=sys.stderr)
         return 2
+
+
+def _outbound(args, outbox):
+    """Outbound commands. Secrets print only when created; tokens never print."""
+    if args.command == "subscription":
+        if args.action == "add":
+            secret = OUTBOUND_DEMO_SECRET if args.demo_secret else args.secret
+            subscription, secret = outbox.subscribe(args.url, args.event_type, secret=secret, allow_remote=args.allow_remote)
+            _print({"subscription": subscription, "secret": secret,
+                    "notice": "Give this secret to the receiver now; RelayBox lists only its fingerprint."})
+        elif args.action == "list":
+            _print({"subscriptions": outbox.subscriptions()})
+        elif args.action == "rotate-secret":
+            subscription, secret = outbox.rotate_secret(args.subscription_id, secret=args.secret, grace_seconds=args.grace_seconds)
+            _print({"subscription": subscription, "secret": secret})
+        else:
+            _print({"subscription": outbox.set_subscription_state(args.subscription_id, active=args.action == "enable")})
+    elif args.command == "publish":
+        message, created = outbox.publish(args.event_type, args.payload.read_bytes(), webhook_id=args.webhook_id)
+        _print({"created": created, "message": message})
+    elif args.command == "relay":
+        counts = run_worker(Inbox(args.db), RelayHandler(outbox), worker=args.worker,
+                            max_jobs=args.max_jobs, lease_seconds=args.lease_seconds)
+        _print(counts)
+        return 1 if counts["failed"] or counts["lost_leases"] else 0
+    elif args.command == "deliver":
+        counts = run_dispatcher(outbox, worker=args.worker, max_deliveries=args.max_deliveries,
+                                lease_seconds=args.lease_seconds, timeout=args.timeout,
+                                wait=args.wait, allow_remote=args.allow_remote)
+        _print(counts)
+        return 1 if counts["awaiting_retry"] or counts["dead_lettered"] or counts["lost_leases"] else 0
+    elif args.command == "deliveries":
+        _print(outbox.list_deliveries(state=args.state, limit=args.limit))
+    else:
+        _print({"delivery": outbox.replay(args.delivery_id)})
+    return 0
 
 
 if __name__ == "__main__":

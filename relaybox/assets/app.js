@@ -94,6 +94,89 @@ function renderJobs(jobs) {
   byId("status").textContent = jobs.length ? `${jobs.length} ${jobs.length === 1 ? "delivery" : "deliveries"} shown · list updated ${new Date().toLocaleTimeString()}` : "No deliveries match this state. Send a signed webhook or run the local demo.";
 }
 
+// Counts stay hidden until a response arrives, so no stale or invented total shows.
+function clearDeliveries() {
+  byId("outbound-counts").hidden = true;
+  for (const key of Object.keys(labels)) byId(`out-${key}`).textContent = "";
+  byId("delivery-rows").replaceChildren();
+}
+
+function lastResult(delivery) {
+  const status = delivery.last_status === null ? "" : `HTTP ${delivery.last_status}`;
+  if (delivery.last_error) return status && !delivery.last_error.startsWith(status) ? `${status} · ${delivery.last_error}` : delivery.last_error;
+  return status || (delivery.state === "leased" ? "Attempt in progress" : "Not attempted yet");
+}
+
+function nextAttempt(delivery) {
+  if (delivery.state === "queued") return date(delivery.available_at);
+  if (delivery.state === "leased") return `Lease until ${date(delivery.lease_until)}`;
+  return "Not scheduled";
+}
+
+function renderDeliveries(data) {
+  for (const key of Object.keys(labels)) byId(`out-${key}`).textContent = String(data.counts[key]);
+  byId("outbound-counts").hidden = false;
+  const fragment = document.createDocumentFragment();
+  for (const delivery of data.deliveries) {
+    const row = document.createElement("tr");
+    // Identifiers stay whole; only the endpoint URL may wrap.
+    for (const [text, wrap] of [[delivery.webhook_id, false], [delivery.event_type, false], [delivery.url, true]]) {
+      const cell = document.createElement("td");
+      const value = document.createElement("code");
+      value.className = wrap ? "wrap" : "nowrap";
+      value.textContent = text;
+      cell.append(value);
+      row.append(cell);
+    }
+    const stateCell = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `badge ${delivery.state}`;
+    badge.textContent = labels[delivery.state];
+    stateCell.append(badge);
+    row.append(stateCell);
+    for (const text of [`${delivery.attempts} / ${delivery.max_attempts}`, lastResult(delivery), nextAttempt(delivery)]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.append(cell);
+    }
+    const action = document.createElement("td");
+    action.className = "nowrap";
+    if (delivery.state === "dead_letter" && data.replay_enabled) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "replay-button";
+      button.textContent = "Replay";
+      button.setAttribute("aria-label", `Replay ${delivery.webhook_id} to ${delivery.url}`);
+      button.addEventListener("click", () => replayDelivery(delivery.id, delivery.webhook_id, button));
+      action.append(button);
+    } else {
+      action.textContent = delivery.state === "dead_letter" ? "Use the CLI" : "Not needed";
+    }
+    row.append(action);
+    fragment.append(row);
+  }
+  byId("delivery-rows").replaceChildren(fragment);
+  const count = data.deliveries.length;
+  byId("outbound-status").textContent = count ? `${count} outbound ${count === 1 ? "delivery" : "deliveries"} shown · list updated ${new Date().toLocaleTimeString()}` : "No outbound deliveries match this state. Add a subscription, then publish or relay a message.";
+}
+
+async function replayDelivery(id, webhookId, button) {
+  button.disabled = true;
+  byId("outbound-status").textContent = `Replaying ${webhookId}…`;
+  let message;
+  try {
+    const response = await fetch(`/api/deliveries/${id}/replay`, {method: "POST", headers: {"Content-Type": "application/json"}, cache: "no-store"});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Replay failed");
+    message = `${webhookId} is queued again with a fresh attempt budget and the same webhook-id. Run relaybox deliver to send it.`;
+  } catch (error) {
+    message = `Replay failed: ${error.message}`;
+  }
+  await refresh();
+  byId("outbound-status").textContent = message;
+  byId("outbound-status").focus(); // The clicked row was re-rendered; keep keyboard focus nearby.
+}
+
 async function refresh() {
   const current = ++generation;
   const state = byId("state").value;
@@ -103,6 +186,9 @@ async function refresh() {
   byId("metrics-status").textContent = "Loading inbox snapshot…";
   byId("rows").replaceChildren();
   byId("status").textContent = "Loading deliveries…";
+  clearDeliveries();
+  byId("outbound-status").textContent = "Loading outbound deliveries…";
+  const outboundState = byId("outbound-state").value;
   // Each section can succeed independently. Older responses never replace a
   // newer refresh, and failed sections have no stale values left as current.
   const metrics = readJSON("/api/metrics").then((value) => {
@@ -120,9 +206,17 @@ async function refresh() {
     byId("rows").replaceChildren();
     byId("status").textContent = `Deliveries unavailable: ${error.message}. Check the local server and refresh.`;
   });
-  await Promise.allSettled([metrics, jobs]);
+  const deliveries = readJSON(`/api/deliveries?limit=100${outboundState ? `&state=${encodeURIComponent(outboundState)}` : ""}`).then((data) => {
+    if (current === generation) renderDeliveries(data);
+  }).catch((error) => {
+    if (current !== generation) return;
+    clearDeliveries();
+    byId("outbound-status").textContent = `Outbound deliveries unavailable: ${error.message}. Refresh to retry.`;
+  });
+  await Promise.allSettled([metrics, jobs, deliveries]);
   if (current === generation) byId("refresh").setAttribute("aria-busy", "false");
 }
 byId("state").addEventListener("change", refresh);
+byId("outbound-state").addEventListener("change", refresh);
 byId("refresh").addEventListener("click", refresh);
 refresh();

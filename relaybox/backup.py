@@ -1,10 +1,11 @@
-"""Bounded online snapshots for trusted local RelayBox schema-1 databases.
+"""Bounded online snapshots for trusted local RelayBox schema-1 and schema-2 databases.
 
 This is an operator recovery tool, not a parser sandbox for hostile SQLite
 files. Directories and files must not be concurrently replaced or edited.
 """
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from functools import lru_cache
 import hashlib
 import math
 import os
@@ -14,31 +15,11 @@ import stat
 import tempfile
 import time
 
-from .store import STATES, ValidationError
+from .store import SCHEMA, STATES, ValidationError
 
 MAX_DATABASE_BYTES = 1_073_741_824
-# Explicit schema-1 allowlist; do not execute SQL obtained from a source file.
-_JOBS_SQL = """CREATE TABLE jobs (
-    id INTEGER PRIMARY KEY,
-    delivery_id TEXT NOT NULL UNIQUE,
-    digest TEXT NOT NULL,
-    body BLOB NOT NULL,
-    state TEXT NOT NULL CHECK(state IN ('queued','leased','succeeded','dead_letter')),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    max_attempts INTEGER NOT NULL,
-    base_delay REAL NOT NULL,
-    max_delay REAL NOT NULL,
-    available_at REAL NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    lease_until REAL,
-    lease_token TEXT,
-    worker TEXT,
-    last_error TEXT,
-    replay_count INTEGER NOT NULL DEFAULT 0
-)"""
-_INDEX_SQL = "CREATE INDEX jobs_ready ON jobs(state, available_at, lease_until, id)"
-_COLUMNS = (
+# The schema-1 jobs columns, pinned independently of the DDL text in store.py.
+_JOBS_COLUMNS = (
     ("id", "INTEGER", 0, None, 1, 0),
     ("delivery_id", "TEXT", 1, None, 0, 0),
     ("digest", "TEXT", 1, None, 0, 0),
@@ -57,6 +38,25 @@ _COLUMNS = (
     ("last_error", "TEXT", 0, None, 0, 0),
     ("replay_count", "INTEGER", 1, "0", 0, 0),
 )
+
+
+@lru_cache(maxsize=None)
+def _expected(version):
+    """Objects and columns for a known version, built from RelayBox's own DDL.
+
+    The statements come from store.SCHEMA and run in a private in-memory
+    database. SQL read from a source file is never executed.
+    """
+    with closing(sqlite3.connect(":memory:")) as reference:
+        for statement in SCHEMA[version]:
+            reference.execute(statement)
+        objects = tuple((kind, name, table, _normalized(sql)) for kind, name, table, sql in
+                        reference.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name"))
+        columns = {name: tuple(tuple(row[1:]) for row in reference.execute(f"PRAGMA table_xinfo({name})"))
+                   for kind, name, _, _ in objects if kind == "table"}
+    if columns["jobs"] != _JOBS_COLUMNS:
+        raise ValidationError("RelayBox's own jobs schema differs from the pinned schema-1 columns")
+    return objects, columns
 
 
 class BackupTimeout(ValidationError):
@@ -167,21 +167,28 @@ def _normalized(sql):
     return " ".join(sql.split()) if isinstance(sql, str) else sql
 
 
+def _state_counts(conn, table, deadline):
+    counts = dict.fromkeys(STATES, 0)
+    for state, count in _execute(conn, f"SELECT state,COUNT(*) FROM {table} GROUP BY state LIMIT 5", deadline):
+        deadline.remaining()
+        if state not in counts:
+            raise ValidationError("database contains an unrecognized job state")
+        counts[state] = count
+    return counts
+
+
 def _metadata(conn, deadline):
     version = _execute(conn, "PRAGMA user_version", deadline).fetchone()[0]
-    if version != 1:
-        raise ValidationError("unsupported RelayBox database schema version; expected 1")
-    schema = _execute(conn, "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name LIMIT 4", deadline).fetchall()
-    expected = [
-        ("table", "jobs", "jobs", _normalized(_JOBS_SQL)),
-        ("index", "jobs_ready", "jobs", _normalized(_INDEX_SQL)),
-        ("index", "sqlite_autoindex_jobs_1", "jobs", None),
-    ]
-    if [(kind, name, table, _normalized(sql)) for kind, name, table, sql in schema] != expected:
-        raise ValidationError("unrecognized RelayBox schema; only the original schema-1 jobs table/indexes are supported")
-    columns = _execute(conn, "PRAGMA table_xinfo(jobs)", deadline).fetchmany(18)
-    if tuple(tuple(row[1:]) for row in columns) != _COLUMNS:
-        raise ValidationError("unrecognized RelayBox jobs structure")
+    if version not in (1, 2):
+        raise ValidationError("unsupported RelayBox database schema version; expected 1 or 2")
+    objects, tables = _expected(version)
+    schema = _execute(conn, f"SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name LIMIT {len(objects) + 1}", deadline).fetchall()
+    if tuple((kind, name, table, _normalized(sql)) for kind, name, table, sql in schema) != objects:
+        raise ValidationError(f"unrecognized RelayBox schema; only the original schema-{version} tables and indexes are supported")
+    for table, expected in tables.items():
+        columns = _execute(conn, f"PRAGMA table_xinfo({table})", deadline).fetchmany(len(expected) + 1)
+        if tuple(tuple(row[1:]) for row in columns) != expected:
+            raise ValidationError(f"unrecognized RelayBox {table} structure")
     pages = _execute(conn, "PRAGMA page_count", deadline).fetchone()[0]
     page_size = _execute(conn, "PRAGMA page_size", deadline).fetchone()[0]
     if pages * page_size > MAX_DATABASE_BYTES:
@@ -190,13 +197,17 @@ def _metadata(conn, deadline):
     if integrity != [("ok",)]:
         # SQLite diagnostic text may contain file data; don't place it in receipts.
         raise ValidationError("database integrity check failed")
-    counts = dict.fromkeys(STATES, 0)
-    for state, count in _execute(conn, "SELECT state,COUNT(*) FROM jobs GROUP BY state LIMIT 5", deadline):
-        deadline.remaining()
-        if state not in counts:
-            raise ValidationError("database contains an unrecognized job state")
-        counts[state] = count
-    return {"schema_version": version, "integrity": "ok", "jobs": sum(counts.values()), "counts": counts}
+    counts = _state_counts(conn, "jobs", deadline)
+    result = {"schema_version": version, "integrity": "ok", "jobs": sum(counts.values()), "counts": counts}
+    if version == 2:
+        if _execute(conn, "PRAGMA foreign_key_check", deadline).fetchmany(1):
+            raise ValidationError("database foreign key check failed")
+        deliveries = _state_counts(conn, "deliveries", deadline)
+        result["outbound"] = {
+            "subscriptions": _execute(conn, "SELECT COUNT(*) FROM subscriptions", deadline).fetchone()[0],
+            "messages": _execute(conn, "SELECT COUNT(*) FROM messages", deadline).fetchone()[0],
+            "deliveries": sum(deliveries.values()), "counts": deliveries}
+    return result
 
 
 def _file_metadata(path, deadline):

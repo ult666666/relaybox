@@ -15,7 +15,7 @@
       <p class="eyebrow">RECEIVE. INSPECT. RECOVER.</p>
       <h1>Every delivery.<br>A traceable next step.</h1>
       <p class="intro">A durable webhook inbox with signed ingestion, fenced leases, and an explicit path back from failure.</p>
-      <div class="notice"><span class="dot" aria-hidden="true"></span>Loopback only · No outbound delivery · Educational engineering demo</div>
+      <div class="notice"><span class="dot" aria-hidden="true"></span>Loopback only · Signed outbound delivery to loopback subscribers · Educational engineering demo</div>
     </header>
     <section aria-label="Queue totals" class="stats" id="stats">
       <article><p>Queued</p><strong id="queued">—</strong><span>Ready or waiting for retry</span></article>
@@ -45,7 +45,19 @@
       <p class="hint">Shows at most 100 matching deliveries. This list is fetched separately from the whole-inbox snapshot above and may reflect a different moment. Refresh manually; no automatic refresh.</p>
     </section>
     <section class="panel detail" aria-labelledby="detail-title"><p class="eyebrow">PAYLOAD INSPECTOR</p><h2 id="detail-title">Select a delivery</h2><p id="detail-meta">Payloads are displayed as plain text. Worker lease tokens stay out of the HTTP API.</p><pre id="payload" tabindex="0" aria-label="Selected delivery JSON payload">No delivery selected.</pre></section>
-    <footer><p><strong>Recovery is deliberate.</strong> To replay a dead letter, use <code>relaybox --db inbox.sqlite3 replay JOB_ID</code> in your local terminal.</p><p>At-least-once processing · SQLite WAL · HMAC SHA-256 · Synthetic demo data available with <code>relaybox demo</code></p></footer>
+    <section class="panel" id="outbound" aria-labelledby="outbound-title">
+      <div class="panel-head"><div><p class="eyebrow">OUTBOUND DELIVERY</p><h2 id="outbound-title">Deliveries to subscribers</h2></div><div class="controls"><label for="outbound-state">Outbound state</label><select id="outbound-state"><option value="">All states</option><option value="queued">Queued</option><option value="leased">Leased</option><option value="succeeded">Succeeded</option><option value="dead_letter">Dead letter</option></select></div></div>
+      <dl class="outbound-counts" id="outbound-counts" aria-label="Outbound delivery totals" hidden>
+        <div><dt>Queued</dt><dd id="out-queued"></dd></div>
+        <div><dt>Leased</dt><dd id="out-leased"></dd></div>
+        <div><dt>Succeeded</dt><dd id="out-succeeded"></dd></div>
+        <div><dt>Dead letter</dt><dd id="out-dead_letter"></dd></div>
+      </dl>
+      <p id="outbound-status" role="status" aria-live="polite" tabindex="-1">Loading outbound deliveries…</p>
+      <div class="table-wrap"><table class="wide"><caption class="sr-only">Latest 100 outbound deliveries, newest first.</caption><thead><tr><th scope="col">Webhook ID</th><th scope="col">Event</th><th scope="col">Endpoint</th><th scope="col">State</th><th scope="col">Attempts</th><th scope="col">Last result</th><th scope="col">Next attempt</th><th scope="col">Replay</th></tr></thead><tbody id="delivery-rows"></tbody></table></div>
+      <p class="hint">Each attempt is signed with Standard Webhooks headers and keeps the message's webhook-id, so receivers can drop duplicates. Dashboard replay needs <code>serve --allow-replay</code>; otherwise use <code>relaybox --db inbox.sqlite3 replay-delivery ID</code>.</p>
+    </section>
+    <footer><p><strong>Recovery is deliberate.</strong> To replay a dead letter, use <code>relaybox --db inbox.sqlite3 replay JOB_ID</code> in your local terminal.</p><p>At-least-once processing · SQLite WAL · HMAC SHA-256 · Standard Webhooks v1 · Synthetic demo data available with <code>relaybox demo</code></p></footer>
   </main>
 </body>
 </html>
