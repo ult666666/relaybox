@@ -22,6 +22,9 @@ from .store import InvalidTransition, ValidationError, _claim_options, _number
 RETRYABLE_4XX = frozenset({408, 429})  # Request Timeout, Too Many Requests.
 MAX_RESPONSE_BYTES = 65_536
 EXCERPT_CHARACTERS = 200
+# The largest allowed max_delay. The wait is capped at max_delay anyway, so a
+# longer request changes nothing, and the receiver cannot push it out of range.
+MAX_RETRY_AFTER = 86_400.0
 
 
 class DeliveryError(Exception):
@@ -100,20 +103,21 @@ def send(target, headers, body, *, timeout, max_response_bytes=4096) -> Response
 def parse_retry_after(value, now):
     """Seconds requested by Retry-After (RFC 9110 §10.2.3), or None if unusable.
 
-    Accepts delay-seconds or an HTTP-date; a date in the past means zero.
+    Accepts delay-seconds or an HTTP-date; a date in the past means zero, and
+    anything longer than MAX_RETRY_AFTER counts as MAX_RETRY_AFTER.
     """
     if value is None:
         return None
     value = value.strip()
     if re.fullmatch(r"[0-9]{1,10}", value):
-        return float(int(value))
+        return min(float(int(value)), MAX_RETRY_AFTER)
     try:
         moment = parsedate_to_datetime(value)
     except (TypeError, ValueError, IndexError, OverflowError):
         return None
     if moment is None or moment.tzinfo is None:
         return None
-    return max(0.0, moment.timestamp() - now)
+    return min(max(0.0, moment.timestamp() - now), MAX_RETRY_AFTER)
 
 
 def _excerpt(body):

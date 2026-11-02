@@ -222,8 +222,10 @@ class OutboxTests(unittest.TestCase):
             self.outbox.replay(claim["id"])
         self.outbox.set_subscription_state(subscription["id"], active=True)
         replayed = self.outbox.replay(claim["id"])
-        self.assertEqual((replayed["state"], replayed["attempts"], replayed["replay_count"], replayed["last_error"]),
-                         ("queued", 0, 1, None))
+        # The documented contract clears the error and the status, so the dashboard
+        # says "Not attempted yet" instead of a stale "HTTP 410" with 0 attempts.
+        self.assertEqual((replayed["state"], replayed["attempts"], replayed["replay_count"], replayed["last_error"],
+                          replayed["last_status"]), ("queued", 0, 1, None, None))
         with self.assertRaises(InvalidTransition):
             self.outbox.replay(claim["id"])
         with self.assertRaises(KeyError):
