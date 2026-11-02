@@ -166,12 +166,12 @@ try {
     assert.equal(await text("leases-active"), "0");
     assert.equal(await text("leases-reclaimable"), "2");
     assert.equal(await text("oldest-ready"), "About 1.7 minutes since ready"); // Actual 104.625 seconds.
-    assert.equal(await text("next-retry"), "— No delayed queued jobs");
-    assert.equal(await text("next-expiry"), "— No active leases");
+    assert.equal(await text("next-retry"), "No delayed jobs");
+    assert.equal(await text("next-expiry"), "No active leases");
     await control({empty: true});
     await refresh();
     assert.equal(await text("queued"), "0");
-    assert.equal(await text("oldest-ready"), "— No ready queued jobs");
+    assert.equal(await text("oldest-ready"), "No ready jobs");
     assert.equal(await page.locator("#rows tr").count(), 0);
     assert.match(await text("status"), /No deliveries/);
     receipt.actual.clock_only_and_empty = true;
@@ -183,7 +183,7 @@ try {
     let probe = metrics;
     await page.route("**/api/metrics", (route) => route.fulfill({json: probe}));
     const boundaries = [
-      [null, "— No ready queued jobs"], [0, "0 seconds since ready"],
+      [null, "No ready jobs"], [0, "0 seconds since ready"],
       [0.000001, "Less than 0.1 seconds since ready"], [0.099999, "Less than 0.1 seconds since ready"],
       [0.1, "About 0.1 seconds since ready"], [0.96, "About 1 second since ready"],
       [1, "About 1 second since ready"], [1.04, "About 1 second since ready"],
@@ -323,7 +323,7 @@ try {
     const nojs = await browser.newContext({javaScriptEnabled: false});
     const shell = await nojs.newPage();
     await shell.goto(fixture.url);
-    assert(await shell.getByRole("heading", {name: "The inbox", exact: true}).isVisible());
+    assert(await shell.getByRole("heading", {name: "Inbound deliveries", exact: true}).isVisible());
     assert.equal(await shell.locator("#queued").innerText(), "—");
     assert.equal(await shell.locator("#payload").innerText(), "No delivery selected.");
     assert.equal(await shell.locator("#rows tr").count(), 0);

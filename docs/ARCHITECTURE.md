@@ -1,6 +1,12 @@
 # Architecture
 
-RelayBox makes ingestion identity, worker ownership and outbound delivery explicit. The runtime is entirely Python's standard library: `http.server`, `http.client`, `hmac`, `hashlib`, `sqlite3`, and a static HTML/CSS/JavaScript dashboard. It is a local learning project rather than a hosted delivery platform.
+How RelayBox identifies a delivery, moves a job between states and owners, signs and retries outbound deliveries, and keeps backups consistent. The runtime uses only Python's standard library (`http.server`, `http.client`, `hmac`, `hashlib` and `sqlite3`) plus a static HTML, CSS and JavaScript dashboard, and it runs on one machine.
+
+- [Delivery identity](#delivery-identity): signatures, freshness and deduplication.
+- [State and ownership](#state-and-ownership): leases, fencing tokens, retries and replay.
+- [Outbound delivery](#outbound-delivery): signing, one attempt, the retry schedule and crashes.
+- [Queue diagnostics](#queue-diagnostics), [bounded local processing](#bounded-local-processing) and [consistent snapshots](#consistent-snapshots-and-recovery).
+- [HTTP and browser boundary](#http-and-browser-boundary), [trade-offs](#deliberate-tradeoffs) and [limits in detail](#limits-in-detail).
 
 ```mermaid
 flowchart LR
@@ -117,7 +123,7 @@ Delivery runs as a bounded command (`deliver`, optionally with `--wait`), not a 
 
 Diagnostics does not call claim or mutate rows. Expired exhausted leases stay in the leased total until a normal claim reconciles them. Oldest-ready wait starts at available_at, not creation; absent waits/dates are explicit nulls. A clock-only change can alter derived partitions with every stored field unchanged. Normal Inbox construction retains its existing database creation/WAL behavior, separate from the metrics SELECT. This is a local snapshot and sampled clock, not continuous monitoring, distributed time, completion assurance or health certification.
 
-The HTTP endpoint returns exactly the object through the usual boundary. Dashboard state cards and an accessible operations definition list share that metrics response; the bounded delivery list is a separate request and is labeled accordingly. Refresh is manual. Successful sections render independently; loading/failed metrics clear old cards/times and report status, while list failure clears list rows without discarding successful metrics. The Refresh button stays focusable with an accessible busy indicator, and both refresh and detail generation guards prevent older responses replacing newer UI state. Dates render in the browser's local timezone, nulls have descriptive markers, and all untrusted text uses textContent. The oldest-ready wait is rounded only in the browser (`About 4.6 seconds since ready`); the API keeps exact seconds, and an invalid wait goes through the metrics error state rather than being shown. Development Chromium checks in `browser/`, also run as a CI job, drive the installed wheel with a supplied-clock fixture and separately labeled controlled responses; no browser library enters the runtime package.
+The HTTP endpoint returns exactly the object through the usual boundary. The dashboard's four state totals and its snapshot details (an accessible definition list) share that metrics response; the bounded delivery list is a separate request and is labeled accordingly. Refresh is manual. Successful sections render independently; loading/failed metrics clear old totals/times and report status, while list failure clears list rows without discarding successful metrics. The Refresh button stays focusable with an accessible busy indicator, and both refresh and detail generation guards prevent older responses replacing newer UI state. Dates render in the browser's local timezone, nulls have descriptive markers, and all untrusted text uses textContent. The oldest-ready wait is rounded only in the browser (`About 4.6 seconds since ready`); the API keeps exact seconds, and an invalid wait goes through the metrics error state rather than being shown. Development Chromium checks in `browser/`, also run as a CI job, drive the installed wheel with a supplied-clock fixture and separately labeled controlled responses; no browser library enters the runtime package.
 
 ## Bounded local processing
 
@@ -152,3 +158,27 @@ The HTTP API does not expose lease tokens or signing secrets. Claim/renew/ack/fa
 SQLite keeps the state machine inspectable and portable, at the cost of serial writes and a single local file. Wall-clock leases are easy to inspect but assume a stable local clock; clock jumps can shorten or extend ownership. A single random token is sufficient for database fencing, but is not an ordered counter for external resources. There is no retention, migration beyond the additive version-2 upgrade, automatic lease renewal for inbound handlers, dead-letter audit trail, remote worker API, exactly-once guarantee or scale claim.
 
 Tests exercise real files and connections, live HTTP sockets, command subprocesses, and a synthetic demo. Browser interaction verification is documented separately in [VERIFICATION.md](VERIFICATION.md). AI assistance was used for implementation and testing; the evidence does not represent an independent security audit.
+
+## Limits in detail
+
+The README lists these in one line each.
+
+- RelayBox serves IPv4 loopback over plain HTTP, with one shared HMAC key for inbound ingestion and no key rotation for it. There is no account authentication, multi-tenant permission model or TLS deployment configuration. Any process or user with local HTTP access can read payloads, and with `--allow-replay` can also replay outbound dead letters.
+- Processing is at least once: a lease can expire during work. Tokens fence acknowledgments in this SQLite database, but they cannot undo or prevent external side effects, so consumers need their own idempotency strategy.
+- The local worker bounds claims, not handler runtime. There are no rate quotas, no background scheduler, no automatic lease renewal for inbound handlers and no distributed worker coordination. The fixed bounds are:
+
+  | Bound | Value |
+  |---|---|
+  | JSON object size | 64 KiB |
+  | Active HTTP handlers | 32 |
+  | Socket read timeout | 3 seconds |
+  | SQLite busy timeout | 10 seconds |
+  | Deliveries per `deliver` run | 1,000 |
+  | Active subscriptions | 100 |
+  | Active secrets per subscription | 5 |
+
+- Outbound delivery is a bounded command, not a service: `deliver` waits only while `--wait` lasts. There is no per-endpoint rate limit, concurrency cap or circuit breaker, no attempt history (only each delivery's latest result), and no delivery of earlier messages to new subscriptions. Without `Retry-After`, the default schedule's five retries wait at most 62 seconds in total (2 + 4 + 8 + 16 + 32), which suits a demo; production schedules span days.
+- Remote targets are opt-in and unfiltered. `--allow-remote` permits any HTTPS host, with no filtering of private address ranges, no DNS pinning and no egress proxy. The attempt deadline does not cover the DNS lookup, and each address a host name resolves to gets its own connection timeout, so one attempt to a name with several unreachable addresses can last several times `--timeout`. Signing secrets are stored unencrypted in the database and its backups.
+- Recovery needs activity: expiry is reconciled on the next claim. The dashboard reports persisted state and may show an expired lease until a worker polls.
+- Storage is bounded only by your disk. There is no retention, encryption at rest, automatic backup, migration beyond the additive version 1 to 2 upgrade, payload search or full audit history. The dashboard shows the latest 100 matches, and the API allows up to 500.
+- This is a demonstration with synthetic data and local checks. It has no production use, capacity benchmark or independent security audit.

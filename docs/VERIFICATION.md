@@ -98,7 +98,7 @@ interpreter, so they are skipped unless `RELAYBOX_BENCH_PYTHON` points at one
   power loss.
 - Browsers other than Chromium, and a full accessibility audit.
 
-The [README limits](../README.md#limits-that-matter), [architecture](ARCHITECTURE.md)
+The [README limits](../README.md#limits), [architecture](ARCHITECTURE.md)
 and [security guidance](../SECURITY.md) describe these boundaries.
 
 ## Bugs found by tests and review
