@@ -297,7 +297,8 @@ class LeaseQueue:
             conn.commit()
             return state
 
-    def _replay(self, row_id, check=None):
+    def _replay(self, row_id, check=None, columns=None):
+        """Reset a dead letter to queued. columns adds fixed, code-defined column values."""
         _job_id(row_id)
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -309,9 +310,11 @@ class LeaseQueue:
                 raise InvalidTransition("only dead-letter jobs can be replayed")
             if check is not None:
                 check(conn, row)
+            extra = dict(columns or {})
+            assignments = "".join(f",{name}=?" for name in extra)
             conn.execute(f"""UPDATE {self.table} SET state='queued',attempts=0,available_at=?,updated_at=?,
-                last_error=NULL,lease_token=NULL,lease_until=NULL,worker=NULL,replay_count=replay_count+1
-                WHERE id=?""", (now, now, row_id))
+                last_error=NULL,lease_token=NULL,lease_until=NULL,worker=NULL,replay_count=replay_count+1{assignments}
+                WHERE id=?""", (now, now, *extra.values(), row_id))
             result = self._claimed(conn, row_id, now)
             conn.commit()
             return result

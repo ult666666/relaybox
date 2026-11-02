@@ -137,6 +137,24 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIsNone(parse_retry_after(value, NOW))
 
+    def test_huge_retry_after_is_capped_and_never_ends_the_run(self):
+        # The receiver controls this header. A value above the Outcome bound
+        # (10^9 s) used to raise out of run_dispatcher: the delivery stayed
+        # leased and the deliveries behind it in the run were never attempted.
+        for value in ["1000000001", "9999999999", "Fri, 31 Dec 9999 23:59:59 GMT"]:
+            with self.subTest(value=value), Receiver(respond(503, [("Retry-After", value)])) as hostile, \
+                    Receiver(204) as healthy:
+                outbox = self.outbox()
+                for receiver in (hostile, healthy):
+                    outbox.subscribe(receiver.url(), ["example.created"])
+                outbox.publish("example.created", b"{}")
+                counts = run_dispatcher(outbox, max_deliveries=5, timeout=0.5, lease_seconds=5)
+                self.assertEqual((counts["claimed"], counts["retried"], counts["succeeded"]), (2, 1, 1))
+                self.assertEqual(len(healthy.requests), 1)
+                retried = outbox.get(1)
+                self.assertEqual((retried["state"], retried["available_at"] - NOW), ("queued", 60))  # max_delay.
+                self.assertEqual(parse_retry_after(value, NOW), 86_400)
+
     def test_failures_follow_the_full_jitter_schedule_then_dead_letter(self):
         oracle = random.Random(11)  # Same seed as the outbox: the exact expected draws.
         with Receiver(default=503) as receiver:

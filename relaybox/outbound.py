@@ -341,12 +341,15 @@ class Outbox(LeaseQueue):
                             columns={"last_status": outcome.status}, after=disable if outcome.kind == "gone" else None)
 
     def replay(self, delivery_id: int) -> dict:
-        """Requeue a dead letter with a fresh attempt budget and the same webhook-id."""
+        """Requeue a dead letter with a fresh attempt budget and the same webhook-id.
+
+        The last error and HTTP status are cleared with the attempt count.
+        """
         def active(conn, row):
             state = conn.execute("SELECT state FROM subscriptions WHERE id=?", (row["subscription_id"],)).fetchone()[0]
             if state != "active":
                 raise InvalidTransition("enable the subscription before replaying its deliveries")
-        self._replay(delivery_id, check=active)
+        self._replay(delivery_id, check=active, columns={"last_status": None})
         return self.get(delivery_id)
 
     def get(self, delivery_id: int) -> dict:

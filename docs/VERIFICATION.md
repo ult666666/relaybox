@@ -15,7 +15,7 @@ local loopback server.
    queue metrics, live HTTP requests, CLI subprocesses, the worker and receipts,
    backup and recovery, the measurement tool, Standard Webhooks signing and
    outbound delivery against live loopback receivers.
-2. `pip install .`, then three scripts that run the installed package from a
+2. `pip install .`, then four scripts that run the installed package from a
    directory outside the checkout:
    - `examples/verify_install.py`: the installed CLI and demo, the packaged
      dashboard assets served over HTTP, `/api/metrics`, and signed ingestion
@@ -136,6 +136,13 @@ also found these bugs, which were reproduced with a failing test and then fixed:
   the socket timeout and the deadline watchdog could both fire at the timeout, so
   the error text varied between runs. Each is now decided explicitly and tested;
   the trickle test's elapsed-time bound shows that the watchdog ends that attempt.
+  A review after the merge found three more. A receiver's `Retry-After` above
+  1,000,000,000 seconds, or a far-future date, raised out of `deliver`: the
+  delivery stayed leased and the deliveries behind it were not attempted. Such
+  values now count as one day. Replay kept a delivery's old HTTP status, although
+  the API contract says replay clears it. The test that accepts the smallest
+  backup deadline (0.1 s) ran a real backup against that deadline and failed once
+  in 24 loaded runs on Python 3.11; it now freezes the deadline clock.
 
 Release notes for each version are on the
 [releases page](https://github.com/ult666666/relaybox/releases).

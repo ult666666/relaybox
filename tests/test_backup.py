@@ -228,7 +228,11 @@ class BackupTests(unittest.TestCase):
             with self.subTest(timeout=str(timeout)[:50]), self.assertRaises(ValidationError):
                 self.backup(self.source, self.destination, timeout=timeout)
             self.assertFalse(self.destination.exists())
-        self.assertEqual(self.backup(self.source, self.destination, timeout=0.1)["jobs"], 0)
+        # 0.1 s is the smallest accepted deadline. A real copy with fsync can take
+        # longer than that on a loaded machine, so freeze the deadline clock: this
+        # checks that 0.1 is accepted, not how fast the disk is.
+        with patch("relaybox.backup.time.monotonic", return_value=1000.0):
+            self.assertEqual(self.backup(self.source, self.destination, timeout=0.1)["jobs"], 0)
 
     @contextmanager
     def observe_backup(self, callback):
