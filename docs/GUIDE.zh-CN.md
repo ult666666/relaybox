@@ -91,3 +91,25 @@ python3 -m relaybox --db .local/recovered.sqlite3 work --receipts .local/receipt
 [测量方法与原始样本](PERFORMANCE.md) 说明预热、原始纳秒样本、分位数和环境。
 这些数值来自一台共享开发机器，不代表生产吞吐量、服务容量或模型响应延迟。
 工具不接受现有数据库路径，也不会修改操作人员的收件箱。
+
+## 向订阅者投递（0.5.0）
+
+0.5.0 增加对外投递。订阅包含端点 URL、事件类型和一个或多个签名密钥。发布消息时，每个匹配的有效订阅生成一条投递；`deliver` 按 [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) 规范发送 JSON POST，附带 `webhook-id`、`webhook-timestamp` 和 `webhook-signature`（`v1,` 加上 `id.timestamp.body` 的 HMAC-SHA256 base64 值）。签名实现与规范公布的测试向量一致。
+
+```bash
+python3 examples/receive_webhooks.py --demo-secret --fail-first 1
+python3 -m relaybox --db .local/out.sqlite3 subscription add http://127.0.0.1:8788/hook --event-type example.created --demo-secret
+python3 -m relaybox --db .local/out.sqlite3 publish example.created examples/payload.json
+python3 -m relaybox --db .local/out.sqlite3 deliver --max-deliveries 10 --wait 15
+```
+
+- 重试：每次等待 0 到 `min(max_delay, base_delay × 2^(attempts−1))` 之间的随机时间（完全抖动），避免同时失败的投递同时重试。`Retry-After` 会把等待提高到至少该值，但不超过 `max_delay`。默认 6 次尝试、基数 2 秒、上限 300 秒。
+- 状态码：2xx 成功；408、429、5xx、超时和连接错误重试；410 进入死信并停用订阅；其余 4xx 和所有 3xx 立即进入死信，从不跟随重定向。
+- 边界：每次尝试有墙钟截止时间（默认 15 秒），最多读取 4 KiB 响应体；租约必须长于截止时间，因此无需续租。
+- 崩溃：投递进程中途崩溃时，租约到期后会以相同的 `webhook-id` 重新发送，接收方应按该 ID 去重。
+- 目标：默认只接受字面量回环地址（`127.0.0.0/8`、`::1`），不解析 `localhost`。非回环端点需要在 `subscription add` 和 `deliver` 上都加 `--allow-remote`，且必须使用带证书校验的 HTTPS。
+- 密钥轮换：`subscription rotate-secret ID --grace-seconds 3600` 新增密钥；宽限期内每次投递对每个有效密钥各附一个签名。
+- 中转：`relay` 按入站载荷的 `type` 字段把就绪任务扇出给订阅者；同一入站投递重复中转不会产生新投递。
+- 控制台：Outbound delivery 面板列出最新投递。只有以 `serve --allow-replay` 启动时才能在页面上重放死信，否则使用 `replay-delivery`。
+
+数据库结构升级为版本 2：用本版本打开版本 1 文件时会在一个事务中添加出站表，不改动已有任务；备份与校验同时支持版本 1 和 2。签名密钥以明文存储在数据库及其备份中。

@@ -13,7 +13,8 @@ local loopback server.
 
 1. The full `unittest` suite: authentication, storage and the job state machine,
    queue metrics, live HTTP requests, CLI subprocesses, the worker and receipts,
-   backup and recovery, and the measurement tool.
+   backup and recovery, the measurement tool, Standard Webhooks signing and
+   outbound delivery against live loopback receivers.
 2. `pip install .`, then three scripts that run the installed package from a
    directory outside the checkout:
    - `examples/verify_install.py`: the installed CLI and demo, the packaged
@@ -23,6 +24,11 @@ local loopback server.
      and the acknowledged final state.
    - `examples/verify_backup.py`: backup, verification and restore to a new path,
      then recovery of an expired lease that reuses its retained receipt.
+   - `examples/verify_outbound.py`: the installed CLI subscribes two endpoints of
+     `examples/receive_webhooks.py`, publishes one message and delivers it. One
+     endpoint answers 503 once and then 204; the other answers 422, is
+     dead-lettered and replayed. The receiver checks every signature with its own
+     code, and all four requests carry the same `webhook-id`.
 3. A small run of `examples/benchmark_metrics.py`, which checks the tool's results
    against an independent oracle. It has no timing threshold.
 4. `relaybox --help`.
@@ -42,6 +48,7 @@ python3 -m venv .venv
 .venv/bin/python examples/verify_install.py
 .venv/bin/python examples/verify_worker.py
 .venv/bin/python examples/verify_backup.py
+.venv/bin/python examples/verify_outbound.py
 ```
 
 Two measurement-tool tests in `tests/test_benchmark.py` run an installed
@@ -63,11 +70,30 @@ interpreter, so they are skipped unless `RELAYBOX_BENCH_PYTHON` points at one
   snapshot is consistent and leaves out uncommitted changes.
 - The browser check holds back real responses to show that a late reply cannot
   overwrite a newer refresh.
+- Outbound tests run the dispatcher against loopback receivers that answer every
+  status class, stall past the deadline, send a valid response one byte at a time,
+  advertise a 64 MiB body, close the connection, send malformed status lines and
+  redirect to a second receiver (which must stay unused). A connection to a closed
+  port covers refusals.
+- Signing reproduces the specification's published test vector, and every test
+  receiver verifies signatures with a separate implementation written from the
+  specification text.
+- A dispatcher subprocess is killed with SIGKILL while its receiver holds the
+  request open. A second dispatcher then reclaims the expired lease and sends the
+  same body with the same `webhook-id`. A second test expires a lease during a
+  slow attempt and checks that the first dispatcher cannot record its late result.
+- Backoff tests check 5,000 random policies against the full-jitter window, compare
+  a real retry schedule with draws from an identically seeded generator, and run a
+  Kolmogorov-Smirnov test of 20,000 delays against the uniform distribution at a
+  fixed seed (the 1% critical value for that sample size is 0.0115).
+- Schema tests build a version-1 file with the exact 0.4.1 statements, back it up,
+  upgrade it in place, and back up the result.
 
 ## Not covered
 
 - Internet-facing deployment, TLS, load or capacity testing, and an independent
-  security audit.
+  security audit. Outbound HTTPS is tested only up to a failed handshake against a
+  plain-text listener; no test sends to a real remote host.
 - Windows ACLs, network filesystems, adversarial concurrent file replacement and
   power loss.
 - Browsers other than Chromium, and a full accessibility audit.
@@ -97,6 +123,19 @@ also found these bugs, which were reproduced with a failing test and then fixed:
   `4.6398069858551025 seconds since ready`. It now rounds for display, and the API
   keeps exact seconds. The browser check's late-response probes could also pass by
   chance; they now wait for the page's own request to finish.
+- **0.5.0:** a local smoke run showed that `deliver --wait` exited 1 even when a
+  retried delivery finally succeeded, because the exit code counted attempts. The
+  summary now reports `awaiting_retry` per delivery, and the exit code uses it.
+  The installed outbound check found two bugs in the example receiver while it was
+  being written: it treated the same `webhook-id` at two endpoints as a duplicate
+  (one message fans out with one ID), and a renamed variable shadowed its HMAC key,
+  so every request failed (the dispatcher correctly retried those as dropped
+  connections). Review found that `http://127.0.0.1:0/` fell back to port 80, that
+  Python releases disagree on whether `::ffff:127.0.0.1` is loopback (3.12.3 says
+  no; 3.11.17 and 3.13.17 say yes), and that
+  the socket timeout and the deadline watchdog could both fire at the timeout, so
+  the error text varied between runs. Each is now decided explicitly and tested;
+  the trickle test's elapsed-time bound shows that the watchdog ends that attempt.
 
 Release notes for each version are on the
 [releases page](https://github.com/ult666666/relaybox/releases).

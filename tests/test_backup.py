@@ -59,7 +59,9 @@ class BackupTests(unittest.TestCase):
         result = self.backup(self.source, self.destination)
         self.assertEqual(result["counts"], {"queued": 1, "leased": 1, "succeeded": 1, "dead_letter": 1})
         self.assertEqual(result["jobs"], 4)
-        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["schema_version"], 2)  # Version 1 files: tests/test_outbound.py.
+        self.assertEqual(result["outbound"], {"subscriptions": 0, "messages": 0, "deliveries": 0,
+                                              "counts": {"queued": 0, "leased": 0, "succeeded": 0, "dead_letter": 0}})
         self.assertEqual(result["integrity"], "ok")
         self.assertEqual(result["source"], str(self.source))
         self.assertEqual(result["destination"], str(self.destination))

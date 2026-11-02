@@ -242,3 +242,98 @@ class MetricsHTTPTests(unittest.TestCase):
             status, _, body = self.request("GET", "/api/metrics")
         self.assertEqual(status, 400)
         self.assertNotIn("NaN", body.decode())
+
+
+class DeliveriesHTTPTests(unittest.TestCase):
+    request = HTTPTests.request
+
+    @classmethod
+    def setUpClass(cls):
+        from relaybox.outbound import Outbox, Outcome
+        cls.tmp = tempfile.TemporaryDirectory()
+        path = Path(cls.tmp.name) / "deliveries-http.sqlite3"
+        cls.inbox = Inbox(path, clock=lambda: 1000)
+        cls.outbox = Outbox(path, clock=lambda: 1000, max_attempts=1)
+        _, cls.secret = cls.outbox.subscribe("http://127.0.0.1:9/hook", ["*"])
+        for index in range(5):
+            cls.outbox.publish("demo.http", b'{"private":"outbound-body-not-listed"}', webhook_id=f"msg_http_{index}")
+        # Deliveries 1-3 are dead letters (one per replay test), 4 is leased, 5 queued.
+        for _ in range(3):
+            claim = cls.outbox.claim("http-dispatcher")
+            cls.outbox.complete(claim["id"], claim["lease_token"], Outcome("permanent", 422, "<img src=x onerror=alert(1)>"))
+        cls.lease = cls.outbox.claim("private-http-dispatcher")
+        cls.servers = {}
+        for allow in [False, True]:
+            server = make_server(cls.inbox, b"synthetic-deliveries-test-secret", port=0, allow_replay=allow)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            cls.servers[allow] = (server, thread)
+
+    @classmethod
+    def tearDownClass(cls):
+        for server, thread in cls.servers.values():
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        cls.tmp.cleanup()
+
+    def use(self, allow):
+        self.port = self.servers[allow][0].server_port
+        return self.port
+
+    def replay(self, delivery_id, allow=True, body=None, **changes):
+        port = self.use(allow)
+        headers = {"Origin": f"http://127.0.0.1:{port}", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json"}
+        headers.update({name.replace("_", "-"): value for name, value in changes.items()})
+        headers = {name: value for name, value in headers.items() if value is not None}
+        status, _, data = self.request("POST", f"/api/deliveries/{delivery_id}/replay", body=body, headers=headers)
+        return status, json.loads(data)
+
+    def test_listing_has_counts_and_no_bodies_tokens_or_secrets(self):
+        self.use(False)
+        status, headers, body = self.request("GET", "/api/deliveries?limit=10")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["counts"], {"queued": 1, "leased": 1, "succeeded": 0, "dead_letter": 3})
+        self.assertEqual((data["limit"], data["replay_enabled"], len(data["deliveries"])), (10, False, 5))
+        self.assertEqual(data["deliveries"][-1]["last_error"], "<img src=x onerror=alert(1)>")
+        for private in [self.lease["lease_token"], "outbound-body-not-listed", self.secret[len("whsec_"):], "lease_token"]:
+            self.assertNotIn(private, body.decode())
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        leased = json.loads(self.request("GET", "/api/deliveries?state=leased")[2])["deliveries"]
+        self.assertEqual([row["webhook_id"] for row in leased], ["msg_http_3"])
+        for path in ["/api/deliveries?state=bad", "/api/deliveries?limit=0", "/api/deliveries?limit=1&limit=2", "/api/deliveries?x=1"]:
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", path)[0], 400)
+        self.use(True)
+        self.assertTrue(json.loads(self.request("GET", "/api/deliveries")[2])["replay_enabled"])
+
+    def test_replay_is_off_unless_enabled(self):
+        status, data = self.replay(1, allow=False)
+        self.assertEqual(status, 403)
+        self.assertIn("--allow-replay", data["error"])
+        self.assertEqual(self.outbox.get(1)["state"], "dead_letter")
+
+    def test_replay_requires_a_same_origin_bodiless_json_post(self):
+        port = self.use(True)
+        rejected = [({"Origin": None}, 403), ({"Origin": "https://attacker.example"}, 403),
+                    ({"Origin": f"http://127.0.0.1:{port + 1}"}, 403), ({"Sec_Fetch_Site": "cross-site"}, 403),
+                    ({"Sec_Fetch_Site": "same-site"}, 403), ({"Content_Type": "text/plain"}, 415),
+                    ({"Content_Type": None}, 415), ({"Content_Type": "application/json; charset=utf-8"}, 415)]
+        for changes, expected in rejected:
+            with self.subTest(changes=changes):
+                self.assertEqual(self.replay(2, **changes)[0], expected)
+        self.assertEqual(self.replay(2, body=b"{}")[0], 415)
+        self.assertEqual(self.outbox.get(2)["state"], "dead_letter")
+
+    def test_replay_moves_only_dead_letters_back_to_queued(self):
+        self.assertEqual(self.replay(4)[0], 409)  # Leased.
+        self.assertEqual(self.replay(999)[0], 404)
+        status, data = self.replay(3)
+        self.assertEqual(status, 200)
+        self.assertEqual((data["delivery"]["state"], data["delivery"]["replay_count"], data["delivery"]["webhook_id"]),
+                         ("queued", 1, "msg_http_2"))
+        self.assertNotIn("secrets", data["delivery"])
+        self.assertEqual(self.replay(3)[0], 409)
+        self.use(True)
+        self.assertEqual(self.request("POST", "/api/deliveries/0/replay")[0], 404)

@@ -97,6 +97,18 @@ try {
     assert.match(await text("next-retry"), /2026/);
     assert.match(await text("next-expiry"), /2026/);
     assert.match(await page.locator("#operations").innerText(), /next worker claim/i);
+    // Outbound panel: actual installed rows; replay is enabled by this fixture.
+    const outbound = await (await page.request.get(`${fixture.url}/api/deliveries?limit=100`)).json();
+    assert.equal(outbound.replay_enabled, true);
+    assert.deepEqual(outbound.counts, {queued: 1, leased: 1, succeeded: 1, dead_letter: 1});
+    for (const key of ["queued", "leased", "succeeded", "dead_letter"]) assert.equal(await text(`out-${key}`), "1", `out-${key}`);
+    assert.equal(await page.locator("#delivery-rows tr").count(), 4);
+    assert.match(await text("delivery-rows"), /HTTP 422 · <img src=x onerror="window.pwned=1">/);
+    assert.match(await text("delivery-rows"), /Lease until .*2026/);
+    assert.match(await text("delivery-rows"), /Not attempted yet/);
+    assert.match(await text("delivery-rows"), /Attempt in progress/);
+    assert.equal(await page.locator("#delivery-rows button").count(), 1); // Only the dead letter.
+    receipt.actual.outbound_rows = outbound.deliveries.map((row) => [row.webhook_id, row.state]);
     await page.getByRole("button", {name: "ready-old", exact: true}).click();
     await page.waitForFunction(() => document.getElementById("payload").textContent.includes("ready-old"));
     assert.match(await text("payload"), /<img src=x/);
@@ -130,6 +142,21 @@ try {
     await page.waitForFunction(() => !document.getElementById("detail-meta").textContent.startsWith("Loading"));
     assert.deepEqual(errors, []); // Includes console errors before intentional failure probes.
     receipt.actual.filter_payload_keyboard = true;
+    await page.getByRole("button", {name: /^Replay msg_browser_dead to /}).click();
+    await page.waitForFunction(() => /queued again/.test(document.getElementById("outbound-status").textContent));
+    assert.equal(await page.evaluate(() => document.activeElement.id), "outbound-status");
+    assert.equal(await text("out-dead_letter"), "0");
+    assert.equal(await text("out-queued"), "2");
+    assert.equal(await page.locator("#delivery-rows button").count(), 0);
+    await page.getByLabel("Outbound state", {exact: true}).selectOption("succeeded");
+    await idle();
+    assert.equal(await page.locator("#delivery-rows tr").count(), 1);
+    await page.getByLabel("Outbound state", {exact: true}).selectOption("");
+    await idle();
+    assert(await fits(), "320px page overflow after outbound replay");
+    assert.equal(await page.evaluate(() => window.pwned), undefined);
+    assert.deepEqual(errors, []);
+    receipt.actual.outbound_replay_keyboard_focus = true;
 
     await control({advance: 100});
     assert.equal(await text("queued-ready"), "2"); // No automatic refresh.
@@ -300,6 +327,8 @@ try {
     assert.equal(await shell.locator("#queued").innerText(), "—");
     assert.equal(await shell.locator("#payload").innerText(), "No delivery selected.");
     assert.equal(await shell.locator("#rows tr").count(), 0);
+    assert(await shell.locator("#outbound-counts").isHidden()); // No placeholder totals without data.
+    assert.equal(await shell.locator("#delivery-rows tr").count(), 0);
     await nojs.close();
     receipt.actual.no_js_static_shell_only = true; // Existing UI requires JS for data; no functional fallback claimed.
     receipt.status = "PASS";

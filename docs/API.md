@@ -14,8 +14,10 @@ Base URL: `http://127.0.0.1:8787`. Every API response is UTF-8 JSON with `Cache-
 | GET | `/api/stats` | `{"counts":{"queued":0,"leased":0,"succeeded":0,"dead_letter":0}}` |
 | GET | `/api/jobs?state=queued&limit=100` | Latest summaries in descending ID order; state optional; limit 1–500, default 100 |
 | GET | `/api/jobs/1` | Detail including parsed `payload`; excludes lease token |
+| GET | `/api/deliveries?state=dead_letter&limit=100` | Latest outbound delivery summaries, whole-table `counts` and `replay_enabled`; state optional; limit 1–500, default 100 |
+| POST | `/api/deliveries/1/replay` | Requeue one outbound dead letter; only when `serve --allow-replay` is set ([contract](#outbound-delivery)) |
 
-Unknown routes return `404`. Unsupported known methods return `405` (unrecognized HTTP methods use the standard parser's JSON `501`). Duplicate/unknown list parameters return `400`. No worker or replay mutation route is exposed over HTTP.
+Unknown routes return `404`. Unsupported known methods return `405` (unrecognized HTTP methods use the standard parser's JSON `501`). Duplicate/unknown list parameters return `400`. The outbound replay route is the only mutation exposed over HTTP; inbound worker operations and inbound replay stay in the CLI and library.
 
 ## Queue metrics
 
@@ -23,7 +25,7 @@ Unknown routes return `404`. Unsupported known methods return `405` (unrecognize
 
 | Field | Meaning / unit |
 |---|---|
-| `schema_version` | Current inbox database schema, 1 |
+| `schema_version` | Version of this response format, 1. It stays 1 although the database schema became 2 in 0.5.0 |
 | `snapshot_at` | One supplied-clock sample, Unix seconds |
 | `counts` | Integer `queued`, `leased`, `succeeded`, `dead_letter` persisted totals |
 | `queued_ready` | Queued rows with `available_at <= snapshot_at` |
@@ -104,8 +106,17 @@ Global `--db PATH` comes **before** the subcommand. Default database: `inbox.sql
 | `ack JOB_ID --token TOKEN` | Complete current unexpired ownership |
 | `fail JOB_ID --token TOKEN --error TEXT` | Schedule bounded backoff or dead letter; error length 1–500 |
 | `replay JOB_ID` | Reset a dead letter to queued and increment replay count |
+| `subscription add URL --event-type TYPE [--event-type ...] [--secret whsec_... \| --demo-secret] [--allow-remote]` | Create an active subscription; prints its secret once |
+| `subscription list` | Subscriptions with secret IDs, fingerprints and expiry, never secret values |
+| `subscription rotate-secret ID [--grace-seconds 86400] [--secret whsec_...]` | Add a new current secret; older ones sign until the grace period ends (0–2,592,000 s); prints the new secret once |
+| `subscription enable ID`, `subscription disable ID` | Change whether new messages fan out to it and whether its deliveries are sent |
+| `publish TYPE FILE [--webhook-id ID]` | Store a JSON object message; queue one delivery per matching active subscription |
+| `relay [--worker relay-worker] [--max-jobs 1] [--lease-seconds 30]` | Fan ready inbound jobs out by their payload's `type` field |
+| `deliver [--worker local-dispatcher] [--max-deliveries 1] [--lease-seconds 60] [--timeout 15] [--wait 0] [--allow-remote]` | Attempt bounded ready deliveries |
+| `deliveries [--state STATE] [--limit 100]` | Latest delivery summaries and counts |
+| `replay-delivery DELIVERY_ID` | Requeue an outbound dead letter with the same `webhook-id` |
 
-All data commands print JSON. Normal completion exits `0`; invalid input, a failed manual transition, or an inbox storage/I/O error exits `2`. `work` exits `1` when its summary contains recorded handler failures or lost leases. An invalid receipt directory fails setup with exit `2`; receipt content/publication failures during handling use the retry/dead-letter policy and exit `1`. A ready-empty claim returns `{"job":null}`. Newly minted tokens contain 64 lowercase hex characters (256 random bits), so they can be pasted safely as CLI option values. Tokens are private local worker capabilities: keep claim output and shell history private when using non-synthetic data. `work` emits counts only, never job payloads or tokens.
+All data commands print JSON. Normal completion exits `0`; invalid input, a failed manual transition, or an inbox storage/I/O error exits `2`. `work` and `relay` exit `1` when their summary contains recorded handler failures or lost leases. `deliver` exits `1` when a delivery ended in dead letter, a lease was lost, or a delivery it attempted is still waiting for a retry when it stops. An invalid receipt directory fails setup with exit `2`; receipt content/publication failures during handling use the retry/dead-letter policy and exit `1`. A ready-empty claim returns `{"job":null}`. Newly minted tokens contain 64 lowercase hex characters (256 random bits), so they can be pasted safely as CLI option values. Tokens are private local worker capabilities: keep claim output and shell history private when using non-synthetic data. `work` emits counts only, never job payloads or tokens.
 
 ## Lease renewal library contract
 
@@ -139,19 +150,19 @@ Use a trusted local directory and trusted parent directories that no other actor
 
 ## Backup and recovery contract
 
-`relaybox.backup.backup_database(source, destination, *, timeout=10) -> dict` accepts an existing regular local schema-1 inbox or snapshot and a new destination in an existing trusted directory. It opens the source with SQLite URI `mode=ro`, `query_only=ON`, `trusted_schema=OFF`, and a read transaction. It never constructs `Inbox`, creates a missing source, executes source-provided SQL, loads extensions, migrates schemas, or attempts repair. Current schema 1 is preserved: no new application ID or migration metadata is required.
+`relaybox.backup.backup_database(source, destination, *, timeout=10) -> dict` accepts an existing regular local schema-1 or schema-2 inbox or snapshot and a new destination in an existing trusted directory. It opens the source with SQLite URI `mode=ro`, `query_only=ON`, `trusted_schema=OFF`, and a read transaction. It never constructs `Inbox`, creates a missing source, executes source-provided SQL, loads extensions, migrates schemas, or attempts repair. The source's schema version (1 or 2) is preserved in the copy; a restored version-1 file is upgraded to version 2 only when RelayBox next opens it with `Inbox` or `Outbox`.
 
-Validation allows only the original `jobs` table, its implicit delivery-ID unique index, and `jobs_ready` index, comparing bounded schema declarations and all 17 column definitions (including type, nullability, default, primary-key and hidden flags). Unknown versions, views, triggers, extra objects, altered constraints or structures are rejected. The module runs SQLite `integrity_check` and counts only the four known states. These checks recognize the application's existing structure; they do not authenticate a file or exhaustively validate every historical payload/policy value. Only trusted operator-owned files are supported. SQLite still parses the input file, so this is not a hostile-file security boundary.
+Validation allows only the tables and indexes of the file's version: for version 1 the original `jobs` table, its implicit delivery-ID unique index and `jobs_ready`; for version 2 also `subscriptions`, `subscription_secrets`, `messages`, `deliveries`, their implicit unique indexes and `deliveries_ready`. It compares bounded schema declarations and every column definition (including type, nullability, default, primary-key and hidden flags) with a reference built by running RelayBox's own schema statements in a private in-memory database; the 17 version-1 `jobs` columns are also pinned separately. Unknown versions, views, triggers, extra objects, altered constraints or structures are rejected. The module runs SQLite `integrity_check` (and `foreign_key_check` for version 2) and counts only the four known states. These checks recognize the application's existing structure; they do not authenticate a file or exhaustively validate every historical payload/policy value. Only trusted operator-owned files are supported. SQLite still parses the input file, so this is not a hostile-file security boundary.
 
 The pinned source transaction supplies consistent metadata and pages through Python's SQLite online backup API (`pages=64`). A same-directory, exclusively created private temporary file receives the database; it is finalized into DELETE journal mode, closed, reopened read-only, validated, and checked against the source snapshot's schema/counts. The completed bytes are SHA-256 hashed and fsynced before an exclusive atomic hard link publishes the final file. The final snapshot needs no source WAL/SHM files. Ordinary errors remove private temporary files and their SQLite sidecars. Source data and existing destination entries are not changed. Existing files, directories, hard links, self-aliases and explicitly selected symlinks fail; existing `DESTINATION-wal`, `-shm`, or `-journal` entries also fail without deletion. Sidecars are checked again before publication.
 
-Success returns this shape (counts shown for an empty inbox):
+Success returns this shape (shown for an empty version-1 inbox):
 
 ```json
 {"source":"/trusted/inbox.sqlite3","destination":"/trusted/snapshot.sqlite3","schema_version":1,"integrity":"ok","jobs":0,"counts":{"queued":0,"leased":0,"succeeded":0,"dead_letter":0},"sha256":"...64 lowercase hex characters...","size_bytes":16384}
 ```
 
-Size is measured, not fixed; callers must not rely on the example value. Metadata never includes row payloads, workers, errors, delivery IDs or lease tokens. Snapshot bytes retain every column, including private tokens and payloads. `sha256` describes the physical snapshot, not a logical digest or signature; a restore may have a different physical hash while preserving all rows.
+Size is measured, not fixed; callers must not rely on the example value. Version-2 receipts add `"outbound": {"subscriptions": N, "messages": N, "deliveries": N, "counts": {...}}` with the four delivery states; version-1 receipts keep the shape above. Metadata never includes row payloads, workers, errors, delivery IDs or lease tokens. Snapshot bytes retain every column, including private tokens and payloads. `sha256` describes the physical snapshot, not a logical digest or signature; a restore may have a different physical hash while preserving all rows.
 
 `relaybox.backup.verify_backup(path, *, timeout=10) -> dict` opens an existing regular file read-only, performs the same schema/integrity/count checks, and returns the metadata above with `path` instead of `source`/`destination`. It requires a quiescent standalone DELETE-journal snapshot without any `-wal`, `-shm`, or `-journal` entries. Before opening SQLite, it reads only the 100-byte database header and requires SQLite magic plus rollback-format read/write versions (both 1 at offsets 18/19). WAL-format inputs are rejected before a `mode=ro` connection could create WAL/SHM files; no arbitrary source sidecars are cleaned up. Do not edit it or run writers during verification. Passing `--db` to the CLI does not initialize or inspect that unrelated path. A live WAL inbox must first be snapshotted with `backup`.
 
@@ -162,3 +173,40 @@ Invalid inputs and recognized-but-unsupported files raise the existing `store.Va
 The selected file and destination directory's ancestors are canonicalized; selected symlinks are refused. Local files/directories must be trusted against concurrent replacement or modification. The checks do not constitute a filesystem sandbox, and cannot secure attacker-writable paths. New snapshot files request `0600` subject to umask and platform rules; no existing permissions are changed. Atomic hard-link support in the destination filesystem is required; unsupported filesystems fail explicitly. Windows ACL behavior, network filesystems and adversarial races are unverified. File contents are fsynced; final directory metadata is not, so power-loss persistence is not promised. A hard kill may leave private `.relaybox-backup-` files; inspect them only with the owning process stopped.
 
 Recovery preserves all attempts, retry policy, timestamps, tokens, worker fields and replay counts. Stop the original service/workers before switching to the restored copy: each database has independent fencing. Expired leases are reclaimed or dead-lettered by ordinary `claim`; unexpired leases retain their remaining expiry. Deduplication reflects only rows present in the snapshot. Receipt files must be retained/backed up separately, and work after the snapshot may repeat. Retaining identical canonical receipts supports the sample handler's local idempotency; it does not create cross-database exactly-once execution or restore external side effects.
+
+## Outbound delivery
+
+All outbound state lives in the same SQLite file as the inbox (schema version 2). `relaybox.outbound.Outbox(path, *, clock=time.time, max_attempts=6, base_delay=2, max_delay=300, rng=None)` validates its policy like `Inbox` (attempts 1–100, delays 0–86,400 seconds) and copies it into each delivery at fan-out. `rng` defaults to `random.SystemRandom()`.
+
+| Method | Contract |
+|---|---|
+| `subscribe(url, event_types, *, secret=None, allow_remote=False) -> (dict, str)` | Validates the URL (see below) and 1–32 event types of `[A-Za-z0-9_]` segments separated by `.`, or `*`. Returns the subscription and its secret; a generated secret has 32 random bytes. At most 100 active subscriptions. |
+| `subscriptions() -> list` | Each subscription with `secrets` metadata: `id`, a 16-hex-digit SHA-256 `fingerprint`, `created_at`, `expires_at`, `active`. Never key bytes. |
+| `rotate_secret(id, *, secret=None, grace_seconds=86400) -> (dict, str)` | Adds a current key; sets older keys to expire at `now + grace_seconds` unless they expire sooner; deletes expired keys; at most 5 active keys. |
+| `set_subscription_state(id, *, active, reason=None) -> dict` | Enables or disables a subscription. |
+| `publish(event_type, body, *, webhook_id=None) -> (dict, bool)` | Body is a JSON object of at most 64 KiB, validated like inbound payloads. `webhook_id` is 1–128 characters of `[A-Za-z0-9_-]` (no `.`), default `msg_` plus 32 random hex digits. Returns the message summary with its delivery count, and whether it was created. Same ID with different type or bytes raises `Conflict`. |
+| `relay(job) -> (dict, bool)` | Publishes a stored inbound job's exact bytes under event type `payload["type"]` and the derived ID `msg_` + `sha256(UTF8(delivery_id) + b"\0" + ASCII(digest)).hexdigest()[:32]`. `RelayHandler(outbox)` wraps it for `run_worker`. |
+| `claim(worker, *, lease_seconds=60)`, `renew(id, token, *, lease_seconds=60)` | Same contract as `Inbox.claim`/`renew`. The private result includes `lease_token`, `body`, `url`, `webhook_id`, `event_type`, `subscription_state` and `secrets` (active raw keys, newest first). |
+| `complete(id, token, outcome) -> str` | Records an `Outcome(kind, status=None, error=None, retry_after=None)` under the current lease and returns the new state. `kind` is `success`, `retry`, `permanent` or `gone`; failures need a 1–500 character error. |
+| `replay(id) -> dict` | Dead letter to queued: attempts 0, `replay_count` + 1, error and status cleared, same `webhook-id`. Raises `InvalidTransition` for other states or a disabled subscription. |
+| `get(id)`, `list_deliveries(*, state=None, limit=100)` | Summaries: delivery fields plus `url`, `subscription_state`, `webhook_id`, `event_type` and `digest`; never body, token or keys. `list_deliveries` returns `{"deliveries": [...], "counts": {...}}` from one read transaction. |
+| `next_due() -> float \| None` | Earliest queued `available_at` or leased `lease_until`. |
+
+`relaybox.dispatch.run_dispatcher(outbox, *, worker="local-dispatcher", max_deliveries=1, lease_seconds=60, timeout=15, allow_remote=False, max_response_bytes=4096, wait=0, sleep=time.sleep) -> dict` checks `max_deliveries` 1–1000, `timeout` 0.01–60 seconds, `wait` 0–3600 seconds, `max_response_bytes` 0–65,536 and `lease_seconds > timeout` before claiming anything. It returns per-attempt counts `claimed`, `succeeded`, `retried`, `dead_lettered`, `lost_leases`, plus `awaiting_retry`: the number of deliveries whose latest attempt in this run scheduled a retry. With `wait` it sleeps until the next due delivery or lease expiry while that falls inside the remaining wait.
+
+Each attempt is one `POST` to the URL's path and query with these headers, and the message body byte for byte:
+
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `webhook-id` | The message's ID, identical on every attempt and replay |
+| `webhook-timestamp` | Attempt time in integer Unix seconds |
+| `webhook-signature` | `v1,` + base64(HMAC-SHA256(key, `id.timestamp.body`)), one per active key, space-separated, newest first |
+| `User-Agent` | `RelayBox/VERSION` |
+| `Connection` | `close` |
+
+Outcomes follow the [classification table](ARCHITECTURE.md#one-attempt). A retry is scheduled at `now + max(uniform(0, min(max_delay, base_delay × 2^(attempts−1))), min(retry_after, max_delay))`, without the second term when there is no usable `Retry-After`. `Retry-After` accepts 1–10 digits of delay-seconds or an HTTP-date with a time zone; a past date counts as 0 and anything else is ignored. Errors stored in `last_error` are bounded text: transport failures are fixed phrases such as `connection refused` or `timed out after 15 s`, and HTTP failures add at most 200 printable characters of the response body.
+
+URL rules: absolute `http://` or `https://`, at most 2048 printable ASCII characters, no spaces, credentials or fragment, and a port from 1 to 65535. Without `allow_remote`, the host must be a literal loopback IP address (`127.0.0.0/8`, `::1` or `::ffff:127.0.0.0/104`). With it, any host is allowed but a non-loopback host must use `https://`, verified with `ssl.create_default_context()`.
+
+`POST /api/deliveries/ID/replay` returns `403` unless `serve --allow-replay` was given. It requires `Origin` equal to `http://127.0.0.1:PORT` or `http://localhost:PORT`, `Sec-Fetch-Site: same-origin` if that header is present (`403` otherwise), and `Content-Type: application/json` with no body (`415` otherwise). Success returns `200` with `{"delivery": {...}}`; a delivery that is not a dead letter or belongs to a disabled subscription returns `409`, an unknown ID `404`.

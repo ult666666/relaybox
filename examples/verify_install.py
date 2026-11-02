@@ -25,7 +25,7 @@ import base64, importlib.metadata, json
 from importlib.resources import files
 from pathlib import Path
 import relaybox
-assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.4.1"
+assert relaybox.__version__ == importlib.metadata.version("relaybox-inbox") == "0.5.0"
 assert "site-packages" in str(Path(relaybox.__file__).resolve())
 assets = {route: base64.b64encode(files("relaybox").joinpath("assets", name).read_bytes()).decode()
           for route, name in [("/", "index.html"), ("/assets/app.js", "app.js"), ("/assets/style.css", "style.css")]}
@@ -74,6 +74,22 @@ print(json.dumps({"version": relaybox.__version__, "assets": assets}))
             assert (metrics["queued_ready"], metrics["queued_delayed"], metrics["leases_active"], metrics["leases_expired_reclaimable"], metrics["leases_expired_exhausted"]) == (1, 0, 1, 0, 0)
             assert metrics["oldest_queued_ready_wait_seconds"] >= 0
             assert metrics["next_retry_at"] is None and metrics["next_lease_expiry"] > metrics["snapshot_at"]
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection.request("GET", "/api/deliveries")
+            response = connection.getresponse()
+            assert response.status == 200
+            outbound = json.loads(response.read())
+            connection.close()
+            assert outbound["counts"] == {"queued": 1, "leased": 1, "succeeded": 1, "dead_letter": 1}
+            assert outbound["replay_enabled"] is False and len(outbound["deliveries"]) == 4
+            dead = next(row for row in outbound["deliveries"] if row["state"] == "dead_letter")
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection.request("POST", f"/api/deliveries/{dead['id']}/replay", headers={
+                "Origin": f"http://127.0.0.1:{port}", "Content-Type": "application/json"})
+            response = connection.getresponse()
+            assert response.status == 403, response.status  # Replay is opt-in with --allow-replay.
+            response.read()
+            connection.close()
             body = b'{"synthetic":true,"message":"installed smoke test"}'
             timestamp = str(int(time.time()))
             delivery = "installed-001"
@@ -91,7 +107,8 @@ print(json.dumps({"version": relaybox.__version__, "assets": assets}))
                 connection.close()
             print(json.dumps({"installed_cli": "ok", "demo_states": 4, "dashboard_assets": 3,
                               "ingest_statuses": statuses, "source_directory_import": False,
-                              "version": installed["version"], "metrics_http": True, "asset_bytes_equal": True}))
+                              "version": installed["version"], "metrics_http": True, "asset_bytes_equal": True,
+                              "deliveries_http": True, "replay_off_by_default": True}))
         finally:
             server.terminate()
             try:

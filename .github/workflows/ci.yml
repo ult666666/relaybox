@@ -32,6 +32,8 @@ jobs:
         run: python examples/verify_worker.py
       - name: Installed snapshot, verification and new-path recovery outside checkout
         run: python examples/verify_backup.py
+      - name: Installed Standard Webhooks delivery, retry, dead letter and replay outside checkout
+        run: python examples/verify_outbound.py
       - name: Installed diagnostic measurement correctness smoke (no timing threshold)
         run: |
           cd "$RUNNER_TEMP"
